@@ -33,12 +33,23 @@ jobs:
             --clean `
             --onefile `
             --name VirtualOnvifCamera `
+            --hidden-import pywintypes `
+            --hidden-import servicemanager `
+            --hidden-import win32event `
+            --hidden-import win32service `
+            --hidden-import win32serviceutil `
             --add-data "static;static" `
             --add-data "onvif_simulator/static/parkings;onvif_simulator/static/parkings" `
             virtual_onvif_camera.py
+
+      - name: Copy service helpers
+        shell: pwsh
+        run: |
+          Copy-Item windows\*.bat dist\
+          python -c "from pathlib import Path; from virtual_onvif_camera import ensure_config_file; ensure_config_file(Path('dist/virtual_onvif_camera.ini'))"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: VirtualOnvifCamera-windows-x64
-          path: dist/VirtualOnvifCamera.exe
+          path: dist/*

@@ -11,6 +11,7 @@ JPEG frames bundled with the app.
 from __future__ import annotations
 
 import argparse
+import configparser
 import datetime as _dt
 import html
 import itertools
@@ -35,11 +36,21 @@ WSD = "http://schemas.xmlsoap.org/ws/2005/04/discovery"
 TDS = "http://www.onvif.org/ver10/device/wsdl"
 TRT = "http://www.onvif.org/ver10/media/wsdl"
 TT = "http://www.onvif.org/ver10/schema"
+CONFIG_FILE_NAME = "virtual_onvif_camera.ini"
+SERVICE_NAME = "VirtualOnvifCamera"
+SERVICE_DISPLAY_NAME = "Virtual ONVIF Camera"
+SERVICE_DESCRIPTION = "Runs a virtual ONVIF camera gateway."
 
 
 def app_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(getattr(sys, "_MEIPASS"))
+    return Path(__file__).resolve().parent
+
+
+def install_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
 
@@ -72,6 +83,82 @@ def default_frame_dir() -> Path:
     ) or root
 
 
+def default_config_path() -> Path:
+    env_path = os.getenv("ONVIF_CONFIG")
+    if env_path:
+        return Path(env_path).expanduser().resolve()
+    return install_dir() / CONFIG_FILE_NAME
+
+
+def default_config_text() -> str:
+    return f"""# Virtual ONVIF Camera configuration
+#
+# Most users can leave this file unchanged. The default RTSP URL is
+# rtsp://<this-computer-ip>:8554/VirtualCamera. If you already have a real
+# RTSP source, put it in rtsp_url.
+
+[camera]
+host = 0.0.0.0
+port = 8000
+public_host = auto
+rtsp_url = auto
+snapshot_url =
+name = VirtualCamera
+manufacturer = Codex
+model = Virtual ONVIF Camera
+serial = VOC-0001
+hardware_id = VOC-HW-1
+location = server
+uuid =
+frame_dir = auto
+frame_seconds = 15
+mjpeg_delay = 0.25
+discovery = true
+discovery_addr = 239.255.255.250
+discovery_port = 3702
+"""
+
+
+def ensure_config_file(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text(default_config_text(), encoding="utf-8")
+    return path
+
+
+def config_bool(value: str, default: bool) -> bool:
+    if value == "":
+        return default
+    return value.strip().lower() in {"1", "yes", "true", "on"}
+
+
+def read_config_defaults(path: Path) -> dict[str, str]:
+    ensure_config_file(path)
+    parser = configparser.ConfigParser()
+    parser.read(path, encoding="utf-8")
+    section = parser["camera"] if parser.has_section("camera") else {}
+    return {
+        "host": section.get("host", "0.0.0.0"),
+        "port": section.get("port", os.getenv("ONVIF_HTTP_PORT", "8000")),
+        "public_host": section.get("public_host", os.getenv("ONVIF_PUBLIC_HOST", "auto")),
+        "rtsp_url": section.get("rtsp_url", os.getenv("ONVIF_RTSP_URL", "auto")),
+        "snapshot_url": section.get("snapshot_url", os.getenv("ONVIF_SNAPSHOT_URL", "")),
+        "name": section.get("name", os.getenv("ONVIF_NAME", "VirtualCamera")),
+        "manufacturer": section.get("manufacturer", os.getenv("ONVIF_MANUFACTURER", "Codex")),
+        "model": section.get("model", os.getenv("ONVIF_MODEL", "Virtual ONVIF Camera")),
+        "serial": section.get("serial", os.getenv("ONVIF_SERIAL", "VOC-0001")),
+        "hardware_id": section.get("hardware_id", os.getenv("ONVIF_HARDWARE_ID", "VOC-HW-1")),
+        "location": section.get("location", os.getenv("ONVIF_LOCATION", "server")),
+        "uuid": section.get("uuid", os.getenv("ONVIF_UUID", "")),
+        "frame_dir": section.get("frame_dir", os.getenv("ONVIF_FRAME_DIR", "auto")),
+        "frame_seconds": section.get("frame_seconds", "15"),
+        "mjpeg_delay": section.get("mjpeg_delay", "0.25"),
+        "discovery": section.get("discovery", "true"),
+        "discovery_addr": section.get("discovery_addr", "239.255.255.250"),
+        "discovery_port": section.get("discovery_port", "3702"),
+    }
+
+
 def xml_escape(value: str) -> str:
     return html.escape(value, quote=True)
 
@@ -90,14 +177,15 @@ class CameraConfig:
         self.serial = args.serial
         self.hardware_id = args.hardware_id
         self.location = args.location
-        self.uuid = normalize_uuid(args.uuid)
-        self.rtsp_url = args.rtsp_url
+        self.uuid = normalize_uuid(args.uuid or None)
+        self.rtsp_url = "" if args.rtsp_url == "auto" else args.rtsp_url
         self.snapshot_url = args.snapshot_url
-        self.public_host = args.public_host or local_ip_for()
-        self.frame_dir = Path(args.frame_dir).expanduser().resolve()
+        self.public_host = local_ip_for() if args.public_host in {None, "", "auto"} else args.public_host
+        frame_dir = str(default_frame_dir()) if args.frame_dir == "auto" else args.frame_dir
+        self.frame_dir = Path(frame_dir).expanduser().resolve()
         self.frame_seconds = max(1, args.frame_seconds)
         self.mjpeg_delay = max(0.05, args.mjpeg_delay)
-        self.discovery_enabled = not args.no_discovery
+        self.discovery_enabled = bool(getattr(args, "discovery_enabled", not getattr(args, "no_discovery", False)))
         self.discovery_addr = args.discovery_addr
         self.discovery_port = args.discovery_port
 
@@ -557,32 +645,46 @@ class DiscoveryServer(threading.Thread):
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--config", default=str(default_config_path()))
+    known, _ = bootstrap.parse_known_args(argv)
+    config_path = Path(known.config).expanduser().resolve()
+    defaults = read_config_defaults(config_path)
+
     parser = argparse.ArgumentParser(
         description="Virtual ONVIF camera gateway. Exposes ONVIF discovery/SOAP and points clients to an RTSP stream.",
+        parents=[bootstrap],
     )
-    parser.add_argument("--host", default="0.0.0.0", help="HTTP bind host")
-    parser.add_argument("--port", type=int, default=int(os.getenv("ONVIF_HTTP_PORT", "8000")), help="HTTP bind port")
-    parser.add_argument("--public-host", default=os.getenv("ONVIF_PUBLIC_HOST"), help="IP/host advertised to ONVIF clients")
-    parser.add_argument("--rtsp-url", default=os.getenv("ONVIF_RTSP_URL", ""), help="RTSP stream URI returned by GetStreamUri")
-    parser.add_argument("--snapshot-url", default=os.getenv("ONVIF_SNAPSHOT_URL", ""), help="Snapshot URI returned by GetSnapshotUri")
-    parser.add_argument("--name", default=os.getenv("ONVIF_NAME", "VirtualCamera"), help="Camera/profile name")
-    parser.add_argument("--manufacturer", default=os.getenv("ONVIF_MANUFACTURER", "Codex"), help="ONVIF manufacturer")
-    parser.add_argument("--model", default=os.getenv("ONVIF_MODEL", "Virtual ONVIF Camera"), help="ONVIF model")
-    parser.add_argument("--serial", default=os.getenv("ONVIF_SERIAL", "VOC-0001"), help="ONVIF serial number")
-    parser.add_argument("--hardware-id", default=os.getenv("ONVIF_HARDWARE_ID", "VOC-HW-1"), help="ONVIF hardware id")
-    parser.add_argument("--location", default=os.getenv("ONVIF_LOCATION", "server"), help="ONVIF scope location")
-    parser.add_argument("--uuid", default=os.getenv("ONVIF_UUID"), help="Stable camera UUID")
-    parser.add_argument("--frame-dir", default=os.getenv("ONVIF_FRAME_DIR", str(default_frame_dir())), help="Directory containing JPEG frames for snapshot/MJPEG")
-    parser.add_argument("--frame-seconds", type=int, default=15, help="Seconds per snapshot frame")
-    parser.add_argument("--mjpeg-delay", type=float, default=0.25, help="Delay between MJPEG frames")
-    parser.add_argument("--no-discovery", action="store_true", help="Disable WS-Discovery")
-    parser.add_argument("--discovery-addr", default="239.255.255.250", help="WS-Discovery multicast address")
-    parser.add_argument("--discovery-port", type=int, default=3702, help="WS-Discovery UDP port")
-    return parser.parse_args(argv)
+    parser.add_argument("--host", default=defaults["host"], help="HTTP bind host")
+    parser.add_argument("--port", type=int, default=int(defaults["port"]), help="HTTP bind port")
+    parser.add_argument("--public-host", default=defaults["public_host"], help="IP/host advertised to ONVIF clients")
+    parser.add_argument("--rtsp-url", default=defaults["rtsp_url"], help="RTSP stream URI returned by GetStreamUri")
+    parser.add_argument("--snapshot-url", default=defaults["snapshot_url"], help="Snapshot URI returned by GetSnapshotUri")
+    parser.add_argument("--name", default=defaults["name"], help="Camera/profile name")
+    parser.add_argument("--manufacturer", default=defaults["manufacturer"], help="ONVIF manufacturer")
+    parser.add_argument("--model", default=defaults["model"], help="ONVIF model")
+    parser.add_argument("--serial", default=defaults["serial"], help="ONVIF serial number")
+    parser.add_argument("--hardware-id", default=defaults["hardware_id"], help="ONVIF hardware id")
+    parser.add_argument("--location", default=defaults["location"], help="ONVIF scope location")
+    parser.add_argument("--uuid", default=defaults["uuid"], help="Stable camera UUID")
+    parser.add_argument("--frame-dir", default=defaults["frame_dir"], help="Directory containing JPEG frames for snapshot/MJPEG")
+    parser.add_argument("--frame-seconds", type=int, default=int(defaults["frame_seconds"]), help="Seconds per snapshot frame")
+    parser.add_argument("--mjpeg-delay", type=float, default=float(defaults["mjpeg_delay"]), help="Delay between MJPEG frames")
+    parser.add_argument(
+        "--no-discovery",
+        dest="discovery_enabled",
+        action="store_false",
+        default=config_bool(defaults["discovery"], True),
+        help="Disable WS-Discovery",
+    )
+    parser.add_argument("--discovery-addr", default=defaults["discovery_addr"], help="WS-Discovery multicast address")
+    parser.add_argument("--discovery-port", type=int, default=int(defaults["discovery_port"]), help="WS-Discovery UDP port")
+    args = parser.parse_args(argv)
+    args.config_path = config_path
+    return args
 
 
-def main(argv: list[str] | None = None) -> int:
-    config = CameraConfig(parse_args(argv or sys.argv[1:]))
+def run_camera(config: CameraConfig, stop_event: threading.Event | None = None) -> None:
     if not config.frame_dir.exists():
         print(f"[warn] frame directory does not exist: {config.frame_dir}")
     print(f"[config] uuid: urn:uuid:{config.uuid}")
@@ -599,14 +701,176 @@ def main(argv: list[str] | None = None) -> int:
     server = ConfiguredHTTPServer((config.host, config.port), VirtualCameraHandler, config)
     print(f"[http] listening on http://{config.host}:{config.port}")
     try:
-        server.serve_forever()
+        if stop_event is None:
+            server.serve_forever()
+        else:
+            server.timeout = 0.5
+            while not stop_event.is_set():
+                server.handle_request()
     except KeyboardInterrupt:
         print("\n[shutdown] stopping")
     finally:
-        server.shutdown()
+        if stop_event is None:
+            server.shutdown()
         server.server_close()
         if discovery:
             discovery.stop()
+
+
+def service_binary_path() -> str:
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --service-run'
+    return f'"{sys.executable}" "{Path(__file__).resolve()}" --service-run'
+
+
+def require_windows() -> None:
+    if os.name != "nt":
+        raise RuntimeError("Windows service commands can only run on Windows.")
+
+
+def install_windows_service() -> None:
+    require_windows()
+    import pywintypes
+    import win32service
+
+    scm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CREATE_SERVICE)
+    try:
+        try:
+            service = win32service.CreateService(
+                scm,
+                SERVICE_NAME,
+                SERVICE_DISPLAY_NAME,
+                win32service.SERVICE_ALL_ACCESS,
+                win32service.SERVICE_WIN32_OWN_PROCESS,
+                win32service.SERVICE_AUTO_START,
+                win32service.SERVICE_ERROR_NORMAL,
+                service_binary_path(),
+                None,
+                0,
+                None,
+                None,
+                None,
+            )
+        except pywintypes.error as exc:
+            if getattr(exc, "winerror", None) == 1073:
+                print(f"[service] {SERVICE_NAME} is already installed")
+                return
+            raise
+        try:
+            win32service.ChangeServiceConfig2(
+                service,
+                win32service.SERVICE_CONFIG_DESCRIPTION,
+                SERVICE_DESCRIPTION,
+            )
+        finally:
+            win32service.CloseServiceHandle(service)
+    finally:
+        win32service.CloseServiceHandle(scm)
+    print(f"[service] installed: {SERVICE_DISPLAY_NAME}")
+
+
+def start_windows_service() -> None:
+    require_windows()
+    import pywintypes
+    import win32serviceutil
+
+    try:
+        win32serviceutil.StartService(SERVICE_NAME)
+        print(f"[service] started: {SERVICE_DISPLAY_NAME}")
+    except pywintypes.error as exc:
+        if getattr(exc, "winerror", None) == 1056:
+            print(f"[service] already running: {SERVICE_DISPLAY_NAME}")
+            return
+        raise
+
+
+def stop_windows_service() -> None:
+    require_windows()
+    import pywintypes
+    import win32serviceutil
+
+    try:
+        win32serviceutil.StopService(SERVICE_NAME)
+        print(f"[service] stopped: {SERVICE_DISPLAY_NAME}")
+    except pywintypes.error as exc:
+        if getattr(exc, "winerror", None) in {1060, 1062}:
+            print(f"[service] not running: {SERVICE_DISPLAY_NAME}")
+            return
+        raise
+
+
+def uninstall_windows_service() -> None:
+    require_windows()
+    import pywintypes
+    import win32serviceutil
+
+    stop_windows_service()
+    try:
+        win32serviceutil.RemoveService(SERVICE_NAME)
+        print(f"[service] uninstalled: {SERVICE_DISPLAY_NAME}")
+    except pywintypes.error as exc:
+        if getattr(exc, "winerror", None) == 1060:
+            print(f"[service] not installed: {SERVICE_DISPLAY_NAME}")
+            return
+        raise
+
+
+def run_windows_service_dispatcher() -> int:
+    require_windows()
+    import servicemanager
+    import win32event
+    import win32service
+    import win32serviceutil
+
+    class VirtualOnvifCameraService(win32serviceutil.ServiceFramework):
+        _svc_name_ = SERVICE_NAME
+        _svc_display_name_ = SERVICE_DISPLAY_NAME
+        _svc_description_ = SERVICE_DESCRIPTION
+
+        def __init__(self, args):
+            super().__init__(args)
+            self.stop_event = threading.Event()
+            self.stop_handle = win32event.CreateEvent(None, 0, 0, None)
+
+        def SvcStop(self):
+            self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+            self.stop_event.set()
+            win32event.SetEvent(self.stop_handle)
+
+        def SvcDoRun(self):
+            servicemanager.LogInfoMsg(f"{SERVICE_DISPLAY_NAME} is starting")
+            config = CameraConfig(parse_args([]))
+            run_camera(config, self.stop_event)
+            servicemanager.LogInfoMsg(f"{SERVICE_DISPLAY_NAME} stopped")
+
+    servicemanager.Initialize()
+    servicemanager.PrepareToHostSingle(VirtualOnvifCameraService)
+    servicemanager.StartServiceCtrlDispatcher()
+    return 0
+
+
+def handle_service_command(command: str) -> int:
+    commands = {
+        "--install-service": install_windows_service,
+        "--start-service": start_windows_service,
+        "--stop-service": stop_windows_service,
+        "--uninstall-service": uninstall_windows_service,
+    }
+    commands[command]()
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "--service-run":
+        return run_windows_service_dispatcher()
+    if argv and argv[0] in {"--install-service", "--start-service", "--stop-service", "--uninstall-service"}:
+        return handle_service_command(argv[0])
+
+    args = parse_args(argv)
+    config = CameraConfig(args)
+    print(f"[config] file: {args.config_path}")
+    run_camera(config)
     return 0
 
 

@@ -18,44 +18,60 @@
 
 ## 快速运行
 
-Python 3.10+：
+Windows 下载 `VirtualOnvifCamera-windows-x64` 后解压，直接双击：
 
-```bash
-python virtual_onvif_camera.py --rtsp-url rtsp://192.168.1.10:8554/live
+```text
+VirtualOnvifCamera.exe
 ```
 
-指定对外 IP、端口和名称：
+第一次运行会自动生成：
 
-```bash
-python virtual_onvif_camera.py \
-  --public-host 192.168.1.50 \
-  --port 8000 \
-  --name ServerCam01 \
-  --rtsp-url rtsp://192.168.1.50:8554/cam01
+```text
+virtual_onvif_camera.ini
 ```
+
+默认会自动识别本机 IP，监听 `8000` 端口，并把 RTSP 地址设置为：
+
+```text
+rtsp://<本机IP>:8554/VirtualCamera
+```
+
+如果你没有 RTSP 源，ONVIF 设备仍然可以被发现，也可以打开快照/MJPEG 预览；但 NVR 真正播放主码流时通常需要一个可用 RTSP 源。需要改 RTSP 地址时，编辑 `virtual_onvif_camera.ini` 里的 `rtsp_url` 即可。
 
 启动后浏览器打开：
 
 ```text
-http://192.168.1.50:8000/
+http://localhost:8000/
 ```
 
-ONVIF 地址：
+局域网内其它设备可打开：
 
 ```text
-http://192.168.1.50:8000/onvif/device_service
+http://本机IP:8000/
 ```
 
-快照地址：
+## 安装为 Windows 服务
+
+下载 artifact 解压后，右键管理员运行：
 
 ```text
-http://192.168.1.50:8000/snapshot.jpg
+InstallService.bat
 ```
 
-MJPEG 预览：
+它会自动安装并启动 `Virtual ONVIF Camera` 服务，不需要手动输入参数。
+
+其它脚本：
 
 ```text
-http://192.168.1.50:8000/mjpeg/1
+StartService.bat
+StopService.bat
+UninstallService.bat
+```
+
+安装服务后，配置仍然读取 exe 同目录的：
+
+```text
+virtual_onvif_camera.ini
 ```
 
 ## 接入 NVR / VMS
@@ -92,7 +108,7 @@ python virtual_onvif_camera.py \
   --rtsp-url rtsp://192.168.1.50:8554/cam01
 ```
 
-## Windows EXE 编译
+## Windows EXE 编译和下载
 
 推送到 GitHub 后，Actions 会自动编译：
 
@@ -110,15 +126,45 @@ Actions -> Build Windows EXE -> Artifacts -> VirtualOnvifCamera-windows-x64
 
 ```text
 VirtualOnvifCamera.exe
+InstallService.bat
+UninstallService.bat
+StartService.bat
+StopService.bat
+virtual_onvif_camera.ini
 ```
 
-运行示例：
+直接运行：
 
 ```powershell
-.\VirtualOnvifCamera.exe --public-host 192.168.1.50 --rtsp-url rtsp://192.168.1.50:8554/cam01
+.\VirtualOnvifCamera.exe
 ```
 
-## 配置参数
+## 配置文件
+
+默认配置文件：
+
+```ini
+[camera]
+host = 0.0.0.0
+port = 8000
+public_host = auto
+rtsp_url = auto
+snapshot_url =
+name = VirtualCamera
+discovery = true
+```
+
+常用字段：
+
+```text
+public_host       对外广播给 NVR 的服务器 IP，auto 为自动识别
+rtsp_url          GetStreamUri 返回的 RTSP 地址，auto 为 rtsp://<本机IP>:8554/VirtualCamera
+port              HTTP / ONVIF 服务端口，默认 8000
+name              摄像机名称，默认 VirtualCamera
+discovery         是否开启 WS-Discovery
+```
+
+## 高级参数
 
 ```text
 --host              HTTP 监听地址，默认 0.0.0.0
