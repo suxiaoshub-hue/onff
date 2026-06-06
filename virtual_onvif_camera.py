@@ -1,0 +1,614 @@
+#!/usr/bin/env python3
+"""
+Lightweight virtual ONVIF camera.
+
+The process exposes enough ONVIF Device/Media SOAP endpoints and WS-Discovery
+responses for many NVR/VMS clients to discover it as a camera. Video is served
+from a configured RTSP URL; snapshot and MJPEG preview can be served from local
+JPEG frames bundled with the app.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import html
+import itertools
+import mimetypes
+import os
+import socket
+import socketserver
+import sys
+import threading
+import time
+import uuid
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Iterable
+from urllib.parse import urlparse
+
+
+SOAP_ENV = "http://www.w3.org/2003/05/soap-envelope"
+WSA = "http://www.w3.org/2005/08/addressing"
+WSD = "http://schemas.xmlsoap.org/ws/2005/04/discovery"
+TDS = "http://www.onvif.org/ver10/device/wsdl"
+TRT = "http://www.onvif.org/ver10/media/wsdl"
+TT = "http://www.onvif.org/ver10/schema"
+
+
+def app_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS"))
+    return Path(__file__).resolve().parent
+
+
+def local_ip_for(target: str = "8.8.8.8") -> str:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect((target, 80))
+        return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        sock.close()
+
+
+def first_existing(paths: Iterable[Path]) -> Path | None:
+    for path in paths:
+        if path.exists():
+            return path
+    return None
+
+
+def default_frame_dir() -> Path:
+    root = app_root()
+    return first_existing(
+        [
+            root / "static" / "cameras" / "1",
+            root / "onvif_simulator" / "static" / "parkings" / "1",
+            root / "onvif_simulator" / "static" / "cameras" / "1",
+        ]
+    ) or root
+
+
+def xml_escape(value: str) -> str:
+    return html.escape(value, quote=True)
+
+
+def iso_utc_now() -> str:
+    return _dt.datetime.now(tz=_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class CameraConfig:
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.host = args.host
+        self.port = args.port
+        self.name = args.name
+        self.manufacturer = args.manufacturer
+        self.model = args.model
+        self.serial = args.serial
+        self.hardware_id = args.hardware_id
+        self.location = args.location
+        self.uuid = normalize_uuid(args.uuid)
+        self.rtsp_url = args.rtsp_url
+        self.snapshot_url = args.snapshot_url
+        self.public_host = args.public_host or local_ip_for()
+        self.frame_dir = Path(args.frame_dir).expanduser().resolve()
+        self.frame_seconds = max(1, args.frame_seconds)
+        self.mjpeg_delay = max(0.05, args.mjpeg_delay)
+        self.discovery_enabled = not args.no_discovery
+        self.discovery_addr = args.discovery_addr
+        self.discovery_port = args.discovery_port
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.public_host}:{self.port}"
+
+    @property
+    def device_service_url(self) -> str:
+        return f"{self.base_url}/onvif/device_service"
+
+    @property
+    def media_service_url(self) -> str:
+        return f"{self.base_url}/onvif/media_service"
+
+    @property
+    def stream_uri(self) -> str:
+        return self.rtsp_url or f"rtsp://{self.public_host}:8554/{self.name}"
+
+    @property
+    def effective_snapshot_url(self) -> str:
+        return self.snapshot_url or f"{self.base_url}/snapshot.jpg"
+
+    def frames(self) -> list[Path]:
+        frames = sorted(
+            p
+            for p in self.frame_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg"}
+        )
+        return frames
+
+    def current_frame(self) -> Path | None:
+        frames = self.frames()
+        if not frames:
+            return None
+        index = int(time.time() / self.frame_seconds) % len(frames)
+        return frames[index]
+
+
+def normalize_uuid(value: str | None) -> str:
+    if value:
+        value = value.strip()
+        if value.startswith("urn:uuid:"):
+            value = value.removeprefix("urn:uuid:")
+        return str(uuid.UUID(value))
+    return str(uuid.uuid4())
+
+
+def soap_envelope(body: str, action: str | None = None) -> bytes:
+    action_node = (
+        f"<wsa:Action>{xml_escape(action)}</wsa:Action>"
+        if action
+        else ""
+    )
+    message_id = f"urn:uuid:{uuid.uuid4()}"
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="{SOAP_ENV}" xmlns:wsa="{WSA}" xmlns:tds="{TDS}" xmlns:trt="{TRT}" xmlns:tt="{TT}">
+  <s:Header>
+    {action_node}
+    <wsa:MessageID>{message_id}</wsa:MessageID>
+    <wsa:To s:mustUnderstand="true">{SOAP_ENV}/role/anonymous</wsa:To>
+  </s:Header>
+  <s:Body>
+    {body}
+  </s:Body>
+</s:Envelope>
+"""
+    return xml.encode("utf-8")
+
+
+def fault(reason: str) -> bytes:
+    return soap_envelope(
+        f"""<s:Fault xmlns:s="{SOAP_ENV}">
+      <s:Code><s:Value>s:Sender</s:Value></s:Code>
+      <s:Reason><s:Text xml:lang="en">{xml_escape(reason)}</s:Text></s:Reason>
+    </s:Fault>"""
+    )
+
+
+def get_services(config: CameraConfig) -> bytes:
+    return soap_envelope(
+        f"""<tds:GetServicesResponse>
+      <tds:Service>
+        <tds:Namespace>{TDS}</tds:Namespace>
+        <tds:XAddr>{xml_escape(config.device_service_url)}</tds:XAddr>
+        <tds:Version><tt:Major>2</tt:Major><tt:Minor>0</tt:Minor></tds:Version>
+      </tds:Service>
+      <tds:Service>
+        <tds:Namespace>{TRT}</tds:Namespace>
+        <tds:XAddr>{xml_escape(config.media_service_url)}</tds:XAddr>
+        <tds:Version><tt:Major>2</tt:Major><tt:Minor>0</tt:Minor></tds:Version>
+      </tds:Service>
+    </tds:GetServicesResponse>""",
+        f"{TDS}/GetServicesResponse",
+    )
+
+
+def get_capabilities(config: CameraConfig) -> bytes:
+    return soap_envelope(
+        f"""<tds:GetCapabilitiesResponse>
+      <tds:Capabilities>
+        <tt:Device>
+          <tt:XAddr>{xml_escape(config.device_service_url)}</tt:XAddr>
+          <tt:Network><tt:IPFilter>false</tt:IPFilter><tt:ZeroConfiguration>false</tt:ZeroConfiguration><tt:IPVersion6>false</tt:IPVersion6><tt:DynDNS>false</tt:DynDNS></tt:Network>
+          <tt:System><tt:DiscoveryResolve>true</tt:DiscoveryResolve><tt:DiscoveryBye>true</tt:DiscoveryBye><tt:RemoteDiscovery>false</tt:RemoteDiscovery><tt:SystemBackup>false</tt:SystemBackup><tt:SystemLogging>false</tt:SystemLogging><tt:FirmwareUpgrade>false</tt:FirmwareUpgrade></tt:System>
+        </tt:Device>
+        <tt:Media>
+          <tt:XAddr>{xml_escape(config.media_service_url)}</tt:XAddr>
+          <tt:StreamingCapabilities><tt:RTPMulticast>false</tt:RTPMulticast><tt:RTP_TCP>true</tt:RTP_TCP><tt:RTP_RTSP_TCP>true</tt:RTP_RTSP_TCP></tt:StreamingCapabilities>
+        </tt:Media>
+      </tds:Capabilities>
+    </tds:GetCapabilitiesResponse>""",
+        f"{TDS}/GetCapabilitiesResponse",
+    )
+
+
+def get_device_information(config: CameraConfig) -> bytes:
+    return soap_envelope(
+        f"""<tds:GetDeviceInformationResponse>
+      <tds:Manufacturer>{xml_escape(config.manufacturer)}</tds:Manufacturer>
+      <tds:Model>{xml_escape(config.model)}</tds:Model>
+      <tds:FirmwareVersion>1.0.0</tds:FirmwareVersion>
+      <tds:SerialNumber>{xml_escape(config.serial)}</tds:SerialNumber>
+      <tds:HardwareId>{xml_escape(config.hardware_id)}</tds:HardwareId>
+    </tds:GetDeviceInformationResponse>""",
+        f"{TDS}/GetDeviceInformationResponse",
+    )
+
+
+def get_scopes(config: CameraConfig) -> bytes:
+    scopes = [
+        "onvif://www.onvif.org/type/video_encoder",
+        "onvif://www.onvif.org/type/Network_Video_Transmitter",
+        f"onvif://www.onvif.org/name/{config.name}",
+        f"onvif://www.onvif.org/location/{config.location}",
+        f"onvif://www.onvif.org/hardware/{config.model}",
+    ]
+    scope_nodes = "\n".join(
+        f"<tds:Scopes><tt:ScopeDef>Fixed</tt:ScopeDef><tt:ScopeItem>{xml_escape(scope)}</tt:ScopeItem></tds:Scopes>"
+        for scope in scopes
+    )
+    return soap_envelope(
+        f"<tds:GetScopesResponse>{scope_nodes}</tds:GetScopesResponse>",
+        f"{TDS}/GetScopesResponse",
+    )
+
+
+def get_system_date_and_time() -> bytes:
+    now = _dt.datetime.now(tz=_dt.timezone.utc)
+    return soap_envelope(
+        f"""<tds:GetSystemDateAndTimeResponse>
+      <tds:SystemDateAndTime>
+        <tt:DateTimeType>NTP</tt:DateTimeType>
+        <tt:DaylightSavings>false</tt:DaylightSavings>
+        <tt:TimeZone><tt:TZ>UTC</tt:TZ></tt:TimeZone>
+        <tt:UTCDateTime>
+          <tt:Time><tt:Hour>{now.hour}</tt:Hour><tt:Minute>{now.minute}</tt:Minute><tt:Second>{now.second}</tt:Second></tt:Time>
+          <tt:Date><tt:Year>{now.year}</tt:Year><tt:Month>{now.month}</tt:Month><tt:Day>{now.day}</tt:Day></tt:Date>
+        </tt:UTCDateTime>
+      </tds:SystemDateAndTime>
+    </tds:GetSystemDateAndTimeResponse>""",
+        f"{TDS}/GetSystemDateAndTimeResponse",
+    )
+
+
+def profile_xml(config: CameraConfig) -> str:
+    return f"""<trt:Profiles fixed="true" token="profile_1">
+      <tt:Name>{xml_escape(config.name)}</tt:Name>
+      <tt:VideoSourceConfiguration token="video_source_config_1">
+        <tt:Name>VideoSourceConfig</tt:Name>
+        <tt:UseCount>1</tt:UseCount>
+        <tt:SourceToken>video_source_1</tt:SourceToken>
+        <tt:Bounds x="0" y="0" width="1920" height="1080"/>
+      </tt:VideoSourceConfiguration>
+      <tt:VideoEncoderConfiguration token="video_encoder_config_1">
+        <tt:Name>H264</tt:Name>
+        <tt:UseCount>1</tt:UseCount>
+        <tt:Encoding>H264</tt:Encoding>
+        <tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution>
+        <tt:Quality>5</tt:Quality>
+        <tt:RateControl><tt:FrameRateLimit>25</tt:FrameRateLimit><tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>4096</tt:BitrateLimit></tt:RateControl>
+        <tt:H264><tt:GovLength>50</tt:GovLength><tt:H264Profile>Main</tt:H264Profile></tt:H264>
+        <tt:SessionTimeout>PT60S</tt:SessionTimeout>
+      </tt:VideoEncoderConfiguration>
+    </trt:Profiles>"""
+
+
+def get_profiles(config: CameraConfig) -> bytes:
+    return soap_envelope(
+        f"<trt:GetProfilesResponse>{profile_xml(config)}</trt:GetProfilesResponse>",
+        f"{TRT}/GetProfilesResponse",
+    )
+
+
+def get_video_sources(config: CameraConfig) -> bytes:
+    return soap_envelope(
+        f"""<trt:GetVideoSourcesResponse>
+      <trt:VideoSources token="video_source_1">
+        <tt:Framerate>25</tt:Framerate>
+        <tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution>
+        <tt:Imaging><tt:Brightness>50</tt:Brightness><tt:ColorSaturation>50</tt:ColorSaturation><tt:Contrast>50</tt:Contrast><tt:Sharpness>50</tt:Sharpness></tt:Imaging>
+      </trt:VideoSources>
+    </trt:GetVideoSourcesResponse>""",
+        f"{TRT}/GetVideoSourcesResponse",
+    )
+
+
+def get_snapshot_uri(config: CameraConfig) -> bytes:
+    return soap_envelope(
+        f"""<trt:GetSnapshotUriResponse>
+      <trt:MediaUri>
+        <tt:Uri>{xml_escape(config.effective_snapshot_url)}</tt:Uri>
+        <tt:InvalidAfterConnect>false</tt:InvalidAfterConnect>
+        <tt:InvalidAfterReboot>false</tt:InvalidAfterReboot>
+        <tt:Timeout>PT60S</tt:Timeout>
+      </trt:MediaUri>
+    </trt:GetSnapshotUriResponse>""",
+        f"{TRT}/GetSnapshotUriResponse",
+    )
+
+
+def get_stream_uri(config: CameraConfig) -> bytes:
+    return soap_envelope(
+        f"""<trt:GetStreamUriResponse>
+      <trt:MediaUri>
+        <tt:Uri>{xml_escape(config.stream_uri)}</tt:Uri>
+        <tt:InvalidAfterConnect>false</tt:InvalidAfterConnect>
+        <tt:InvalidAfterReboot>false</tt:InvalidAfterReboot>
+        <tt:Timeout>PT60S</tt:Timeout>
+      </trt:MediaUri>
+    </trt:GetStreamUriResponse>""",
+        f"{TRT}/GetStreamUriResponse",
+    )
+
+
+def dispatch_soap(config: CameraConfig, payload: str) -> bytes:
+    actions = [
+        ("GetServices", lambda: get_services(config)),
+        ("GetCapabilities", lambda: get_capabilities(config)),
+        ("GetDeviceInformation", lambda: get_device_information(config)),
+        ("GetScopes", lambda: get_scopes(config)),
+        ("GetSystemDateAndTime", get_system_date_and_time),
+        ("GetProfiles", lambda: get_profiles(config)),
+        ("GetVideoSources", lambda: get_video_sources(config)),
+        ("GetSnapshotUri", lambda: get_snapshot_uri(config)),
+        ("GetStreamUri", lambda: get_stream_uri(config)),
+    ]
+    for action, response in actions:
+        if action in payload:
+            return response()
+    return fault("Unsupported ONVIF action")
+
+
+class VirtualCameraHandler(BaseHTTPRequestHandler):
+    server_version = "VirtualONVIFCamera/1.0"
+
+    @property
+    def config(self) -> CameraConfig:
+        return self.server.config  # type: ignore[attr-defined]
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        print(f"[http] {self.client_address[0]} - {fmt % args}")
+
+    def do_GET(self) -> None:
+        path = urlparse(self.path).path
+        if path in {"/", "/index.html"}:
+            self.write_status_page()
+        elif path in {"/snapshot.jpg", "/snapshot/1.jpg", "/camera/1/"}:
+            self.write_snapshot()
+        elif path in {"/mjpeg", "/mjpeg/1"}:
+            self.write_mjpeg()
+        elif path.startswith("/static/"):
+            self.write_static(path.removeprefix("/static/"))
+        else:
+            self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_POST(self) -> None:
+        path = urlparse(self.path).path
+        if not path.startswith("/onvif"):
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        size = int(self.headers.get("Content-Length", "0"))
+        payload = self.rfile.read(size).decode("utf-8", errors="replace")
+        response = dispatch_soap(self.config, payload)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/soap+xml; charset=utf-8")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
+
+    def write_status_page(self) -> None:
+        body = f"""<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>{xml_escape(self.config.name)}</title>
+<body>
+<h1>{xml_escape(self.config.name)}</h1>
+<p>ONVIF Device Service: <code>{xml_escape(self.config.device_service_url)}</code></p>
+<p>ONVIF Media Service: <code>{xml_escape(self.config.media_service_url)}</code></p>
+<p>RTSP Stream URI: <code>{xml_escape(self.config.stream_uri)}</code></p>
+<p>Snapshot: <a href="/snapshot.jpg">/snapshot.jpg</a></p>
+<p>MJPEG preview: <a href="/mjpeg/1">/mjpeg/1</a></p>
+</body>
+</html>
+""".encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def write_snapshot(self) -> None:
+        frame = self.config.current_frame()
+        if frame is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "No JPEG frames found")
+            return
+        data = frame.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def write_mjpeg(self) -> None:
+        frames = self.config.frames()
+        if not frames:
+            self.send_error(HTTPStatus.NOT_FOUND, "No JPEG frames found")
+            return
+        boundary = "virtual-onvif-camera"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", f"multipart/x-mixed-replace; boundary={boundary}")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        for frame in itertools.cycle(frames):
+            try:
+                data = frame.read_bytes()
+                self.wfile.write(f"--{boundary}\r\n".encode("ascii"))
+                self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                self.wfile.write(f"Content-Length: {len(data)}\r\n\r\n".encode("ascii"))
+                self.wfile.write(data)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
+                time.sleep(self.config.mjpeg_delay)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                break
+
+    def write_static(self, relative: str) -> None:
+        root = app_root() / "static"
+        target = (root / relative).resolve()
+        if not str(target).startswith(str(root.resolve())) or not target.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        data = target.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+class ConfiguredHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, addr: tuple[str, int], handler, config: CameraConfig) -> None:
+        self.config = config
+        super().__init__(addr, handler)
+
+
+def discovery_probe_match(config: CameraConfig, relates_to: str | None = None) -> bytes:
+    relates = f"<a:RelatesTo>{xml_escape(relates_to)}</a:RelatesTo>" if relates_to else ""
+    scopes = " ".join(
+        [
+            "onvif://www.onvif.org/type/video_encoder",
+            "onvif://www.onvif.org/type/Network_Video_Transmitter",
+            f"onvif://www.onvif.org/name/{config.name}",
+            f"onvif://www.onvif.org/location/{config.location}",
+        ]
+    )
+    message_id = f"urn:uuid:{uuid.uuid4()}"
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<e:Envelope xmlns:e="{SOAP_ENV}" xmlns:a="{WSA}" xmlns:d="{WSD}" xmlns:dn="http://www.onvif.org/ver10/network/wsdl">
+  <e:Header>
+    <a:Action>{WSD}/ProbeMatches</a:Action>
+    <a:MessageID>{message_id}</a:MessageID>
+    {relates}
+    <a:To>{WSA}/anonymous</a:To>
+  </e:Header>
+  <e:Body>
+    <d:ProbeMatches>
+      <d:ProbeMatch>
+        <a:EndpointReference>
+          <a:Address>urn:uuid:{xml_escape(config.uuid)}</a:Address>
+        </a:EndpointReference>
+        <d:Types>dn:NetworkVideoTransmitter</d:Types>
+        <d:Scopes>{xml_escape(scopes)}</d:Scopes>
+        <d:XAddrs>{xml_escape(config.device_service_url)}</d:XAddrs>
+        <d:MetadataVersion>1</d:MetadataVersion>
+      </d:ProbeMatch>
+    </d:ProbeMatches>
+  </e:Body>
+</e:Envelope>
+"""
+    return xml.encode("utf-8")
+
+
+def extract_message_id(payload: str) -> str | None:
+    for tag in ("MessageID", "wsa:MessageID", "a:MessageID"):
+        start = payload.find(f"<{tag}>")
+        end = payload.find(f"</{tag}>")
+        if start >= 0 and end > start:
+            return payload[start + len(tag) + 2 : end].strip()
+    return None
+
+
+class DiscoveryServer(threading.Thread):
+    def __init__(self, config: CameraConfig) -> None:
+        super().__init__(daemon=True)
+        self.config = config
+        self._stop_event = threading.Event()
+        self._sock: socket.socket | None = None
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._sock:
+            self._sock.close()
+
+    def run(self) -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        self._sock = sock
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("", self.config.discovery_port))
+            mreq = socket.inet_aton(self.config.discovery_addr) + socket.inet_aton("0.0.0.0")
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+            print(f"[discovery] listening on udp://{self.config.discovery_addr}:{self.config.discovery_port}")
+        except OSError as exc:
+            print(f"[discovery] disabled: {exc}")
+            return
+
+        while not self._stop_event.is_set():
+            try:
+                data, addr = sock.recvfrom(65535)
+            except OSError:
+                break
+            payload = data.decode("utf-8", errors="replace")
+            if "Probe" not in payload and "Resolve" not in payload:
+                continue
+            response = discovery_probe_match(self.config, extract_message_id(payload))
+            try:
+                sock.sendto(response, addr)
+                print(f"[discovery] replied to {addr[0]}:{addr[1]}")
+            except OSError as exc:
+                print(f"[discovery] reply failed: {exc}")
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Virtual ONVIF camera gateway. Exposes ONVIF discovery/SOAP and points clients to an RTSP stream.",
+    )
+    parser.add_argument("--host", default="0.0.0.0", help="HTTP bind host")
+    parser.add_argument("--port", type=int, default=int(os.getenv("ONVIF_HTTP_PORT", "8000")), help="HTTP bind port")
+    parser.add_argument("--public-host", default=os.getenv("ONVIF_PUBLIC_HOST"), help="IP/host advertised to ONVIF clients")
+    parser.add_argument("--rtsp-url", default=os.getenv("ONVIF_RTSP_URL", ""), help="RTSP stream URI returned by GetStreamUri")
+    parser.add_argument("--snapshot-url", default=os.getenv("ONVIF_SNAPSHOT_URL", ""), help="Snapshot URI returned by GetSnapshotUri")
+    parser.add_argument("--name", default=os.getenv("ONVIF_NAME", "VirtualCamera"), help="Camera/profile name")
+    parser.add_argument("--manufacturer", default=os.getenv("ONVIF_MANUFACTURER", "Codex"), help="ONVIF manufacturer")
+    parser.add_argument("--model", default=os.getenv("ONVIF_MODEL", "Virtual ONVIF Camera"), help="ONVIF model")
+    parser.add_argument("--serial", default=os.getenv("ONVIF_SERIAL", "VOC-0001"), help="ONVIF serial number")
+    parser.add_argument("--hardware-id", default=os.getenv("ONVIF_HARDWARE_ID", "VOC-HW-1"), help="ONVIF hardware id")
+    parser.add_argument("--location", default=os.getenv("ONVIF_LOCATION", "server"), help="ONVIF scope location")
+    parser.add_argument("--uuid", default=os.getenv("ONVIF_UUID"), help="Stable camera UUID")
+    parser.add_argument("--frame-dir", default=os.getenv("ONVIF_FRAME_DIR", str(default_frame_dir())), help="Directory containing JPEG frames for snapshot/MJPEG")
+    parser.add_argument("--frame-seconds", type=int, default=15, help="Seconds per snapshot frame")
+    parser.add_argument("--mjpeg-delay", type=float, default=0.25, help="Delay between MJPEG frames")
+    parser.add_argument("--no-discovery", action="store_true", help="Disable WS-Discovery")
+    parser.add_argument("--discovery-addr", default="239.255.255.250", help="WS-Discovery multicast address")
+    parser.add_argument("--discovery-port", type=int, default=3702, help="WS-Discovery UDP port")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    config = CameraConfig(parse_args(argv or sys.argv[1:]))
+    if not config.frame_dir.exists():
+        print(f"[warn] frame directory does not exist: {config.frame_dir}")
+    print(f"[config] uuid: urn:uuid:{config.uuid}")
+    print(f"[config] device service: {config.device_service_url}")
+    print(f"[config] media service: {config.media_service_url}")
+    print(f"[config] rtsp uri: {config.stream_uri}")
+    print(f"[config] snapshot uri: {config.effective_snapshot_url}")
+
+    discovery = None
+    if config.discovery_enabled:
+        discovery = DiscoveryServer(config)
+        discovery.start()
+
+    server = ConfiguredHTTPServer((config.host, config.port), VirtualCameraHandler, config)
+    print(f"[http] listening on http://{config.host}:{config.port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[shutdown] stopping")
+    finally:
+        server.shutdown()
+        server.server_close()
+        if discovery:
+            discovery.stop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
