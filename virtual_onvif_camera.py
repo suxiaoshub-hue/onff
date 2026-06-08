@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import copy
 import datetime as _dt
 import html
+import ipaddress
 import itertools
 import mimetypes
 import os
@@ -40,6 +42,10 @@ CONFIG_FILE_NAME = "virtual_onvif_camera.ini"
 SERVICE_NAME = "VirtualOnvifCamera"
 SERVICE_DISPLAY_NAME = "Virtual ONVIF Camera"
 SERVICE_DESCRIPTION = "Runs a virtual ONVIF camera gateway."
+DISCOVERY_TO = "urn:schemas-xmlsoap-org:ws:2005:04:discovery"
+DISCOVERY_SCOPE_MATCH_BY = "http://schemas.xmlsoap.org/ws/2005/04/discovery/rfc3986"
+DISCOVERY_INSTANCE_ID = int(time.time())
+DISCOVERY_MESSAGE_NUMBER = itertools.count(1)
 
 
 def app_root() -> Path:
@@ -63,6 +69,53 @@ def local_ip_for(target: str = "8.8.8.8") -> str:
         return "127.0.0.1"
     finally:
         sock.close()
+
+
+def is_usable_lan_ip(value: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return ip.version == 4 and not ip.is_loopback and not ip.is_link_local and not ip.is_unspecified
+
+
+def local_ipv4_candidates() -> list[str]:
+    candidates: list[str] = []
+
+    def add(value: str) -> None:
+        if is_usable_lan_ip(value) and value not in candidates:
+            candidates.append(value)
+
+    for target in ("239.255.255.250", "192.168.1.1", "192.168.0.1", "10.0.0.1", "172.16.0.1", "8.8.8.8"):
+        add(local_ip_for(target))
+
+    for host in {socket.gethostname(), socket.getfqdn()}:
+        try:
+            infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_DGRAM)
+        except OSError:
+            continue
+        for info in infos:
+            add(info[4][0])
+
+    def score(value: str) -> tuple[int, str]:
+        ip = ipaddress.ip_address(value)
+        return (0 if ip.is_private else 1, value)
+
+    return sorted(candidates, key=score)
+
+
+def auto_public_host() -> str:
+    candidates = local_ipv4_candidates()
+    return candidates[0] if candidates else "127.0.0.1"
+
+
+def host_without_port(value: str) -> str:
+    value = value.strip()
+    if value.startswith("[") and "]" in value:
+        return value[1 : value.index("]")]
+    if value.count(":") == 1:
+        return value.split(":", 1)[0]
+    return value
 
 
 def first_existing(paths: Iterable[Path]) -> Path | None:
@@ -180,7 +233,7 @@ class CameraConfig:
         self.uuid = normalize_uuid(args.uuid or None)
         self.rtsp_url = "" if args.rtsp_url == "auto" else args.rtsp_url
         self.snapshot_url = args.snapshot_url
-        self.public_host = local_ip_for() if args.public_host in {None, "", "auto"} else args.public_host
+        self.public_host = auto_public_host() if args.public_host in {None, "", "auto"} else args.public_host
         frame_dir = str(default_frame_dir()) if args.frame_dir == "auto" else args.frame_dir
         self.frame_dir = Path(frame_dir).expanduser().resolve()
         self.frame_seconds = max(1, args.frame_seconds)
@@ -446,6 +499,17 @@ class VirtualCameraHandler(BaseHTTPRequestHandler):
     def config(self) -> CameraConfig:
         return self.server.config  # type: ignore[attr-defined]
 
+    def config_for_request(self) -> CameraConfig:
+        config = copy.copy(self.config)
+        host = host_without_port(self.headers.get("Host", ""))
+        if host and host not in {"0.0.0.0", "::"}:
+            config.public_host = host
+            return config
+        local_host = self.connection.getsockname()[0]
+        if is_usable_lan_ip(local_host):
+            config.public_host = local_host
+        return config
+
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"[http] {self.client_address[0]} - {fmt % args}")
 
@@ -469,7 +533,7 @@ class VirtualCameraHandler(BaseHTTPRequestHandler):
             return
         size = int(self.headers.get("Content-Length", "0"))
         payload = self.rfile.read(size).decode("utf-8", errors="replace")
-        response = dispatch_soap(self.config, payload)
+        response = dispatch_soap(self.config_for_request(), payload)
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/soap+xml; charset=utf-8")
         self.send_header("Content-Length", str(len(response)))
@@ -557,9 +621,8 @@ class ConfiguredHTTPServer(ThreadingHTTPServer):
         super().__init__(addr, handler)
 
 
-def discovery_probe_match(config: CameraConfig, relates_to: str | None = None) -> bytes:
-    relates = f"<a:RelatesTo>{xml_escape(relates_to)}</a:RelatesTo>" if relates_to else ""
-    scopes = " ".join(
+def discovery_scopes(config: CameraConfig) -> str:
+    return " ".join(
         [
             "onvif://www.onvif.org/type/video_encoder",
             "onvif://www.onvif.org/type/Network_Video_Transmitter",
@@ -567,27 +630,92 @@ def discovery_probe_match(config: CameraConfig, relates_to: str | None = None) -
             f"onvif://www.onvif.org/location/{config.location}",
         ]
     )
+
+
+def discovery_types() -> str:
+    return "dn:NetworkVideoTransmitter tds:Device"
+
+
+def discovery_app_sequence() -> str:
+    return f'<d:AppSequence InstanceId="{DISCOVERY_INSTANCE_ID}" MessageNumber="{next(DISCOVERY_MESSAGE_NUMBER)}"/>'
+
+
+def discovery_device_service_url(config: CameraConfig, public_host: str | None = None) -> str:
+    if public_host:
+        return f"http://{public_host}:{config.port}/onvif/device_service"
+    return config.device_service_url
+
+
+def discovery_target_xml(config: CameraConfig, tag: str, public_host: str | None = None) -> str:
+    scopes = discovery_scopes(config)
+    xaddr = discovery_device_service_url(config, public_host)
+    return f"""      <d:{tag}>
+        <a:EndpointReference>
+          <a:Address>urn:uuid:{xml_escape(config.uuid)}</a:Address>
+        </a:EndpointReference>
+        <d:Types>{discovery_types()}</d:Types>
+        <d:Scopes MatchBy="{DISCOVERY_SCOPE_MATCH_BY}">{xml_escape(scopes)}</d:Scopes>
+        <d:XAddrs>{xml_escape(xaddr)}</d:XAddrs>
+        <d:MetadataVersion>1</d:MetadataVersion>
+      </d:{tag}>"""
+
+
+def discovery_probe_match(config: CameraConfig, relates_to: str | None = None, public_host: str | None = None) -> bytes:
+    relates = f"<a:RelatesTo>{xml_escape(relates_to)}</a:RelatesTo>" if relates_to else ""
     message_id = f"urn:uuid:{uuid.uuid4()}"
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<e:Envelope xmlns:e="{SOAP_ENV}" xmlns:a="{WSA}" xmlns:d="{WSD}" xmlns:dn="http://www.onvif.org/ver10/network/wsdl">
+<e:Envelope xmlns:e="{SOAP_ENV}" xmlns:a="{WSA}" xmlns:d="{WSD}" xmlns:dn="http://www.onvif.org/ver10/network/wsdl" xmlns:tds="{TDS}">
   <e:Header>
     <a:Action>{WSD}/ProbeMatches</a:Action>
     <a:MessageID>{message_id}</a:MessageID>
     {relates}
     <a:To>{WSA}/anonymous</a:To>
+    {discovery_app_sequence()}
   </e:Header>
   <e:Body>
     <d:ProbeMatches>
-      <d:ProbeMatch>
-        <a:EndpointReference>
-          <a:Address>urn:uuid:{xml_escape(config.uuid)}</a:Address>
-        </a:EndpointReference>
-        <d:Types>dn:NetworkVideoTransmitter</d:Types>
-        <d:Scopes>{xml_escape(scopes)}</d:Scopes>
-        <d:XAddrs>{xml_escape(config.device_service_url)}</d:XAddrs>
-        <d:MetadataVersion>1</d:MetadataVersion>
-      </d:ProbeMatch>
+{discovery_target_xml(config, "ProbeMatch", public_host)}
     </d:ProbeMatches>
+  </e:Body>
+</e:Envelope>
+"""
+    return xml.encode("utf-8")
+
+
+def discovery_resolve_match(config: CameraConfig, relates_to: str | None = None, public_host: str | None = None) -> bytes:
+    relates = f"<a:RelatesTo>{xml_escape(relates_to)}</a:RelatesTo>" if relates_to else ""
+    message_id = f"urn:uuid:{uuid.uuid4()}"
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<e:Envelope xmlns:e="{SOAP_ENV}" xmlns:a="{WSA}" xmlns:d="{WSD}" xmlns:dn="http://www.onvif.org/ver10/network/wsdl" xmlns:tds="{TDS}">
+  <e:Header>
+    <a:Action>{WSD}/ResolveMatches</a:Action>
+    <a:MessageID>{message_id}</a:MessageID>
+    {relates}
+    <a:To>{WSA}/anonymous</a:To>
+    {discovery_app_sequence()}
+  </e:Header>
+  <e:Body>
+    <d:ResolveMatches>
+{discovery_target_xml(config, "ResolveMatch", public_host)}
+    </d:ResolveMatches>
+  </e:Body>
+</e:Envelope>
+"""
+    return xml.encode("utf-8")
+
+
+def discovery_hello(config: CameraConfig) -> bytes:
+    message_id = f"urn:uuid:{uuid.uuid4()}"
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<e:Envelope xmlns:e="{SOAP_ENV}" xmlns:a="{WSA}" xmlns:d="{WSD}" xmlns:dn="http://www.onvif.org/ver10/network/wsdl" xmlns:tds="{TDS}">
+  <e:Header>
+    <a:Action>{WSD}/Hello</a:Action>
+    <a:MessageID>{message_id}</a:MessageID>
+    <a:To>{DISCOVERY_TO}</a:To>
+    {discovery_app_sequence()}
+  </e:Header>
+  <e:Body>
+{discovery_target_xml(config, "Hello")}
   </e:Body>
 </e:Envelope>
 """
@@ -619,6 +747,18 @@ class DiscoveryServer(threading.Thread):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self._sock = sock
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except OSError:
+                pass
+        try:
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+            if is_usable_lan_ip(self.config.public_host):
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.config.public_host))
+        except OSError:
+            pass
         try:
             sock.bind(("", self.config.discovery_port))
             mreq = socket.inet_aton(self.config.discovery_addr) + socket.inet_aton("0.0.0.0")
@@ -628,6 +768,12 @@ class DiscoveryServer(threading.Thread):
             print(f"[discovery] disabled: {exc}")
             return
 
+        try:
+            sock.sendto(discovery_hello(self.config), (self.config.discovery_addr, self.config.discovery_port))
+            print(f"[discovery] hello sent to {self.config.discovery_addr}:{self.config.discovery_port}")
+        except OSError as exc:
+            print(f"[discovery] hello failed: {exc}")
+
         while not self._stop_event.is_set():
             try:
                 data, addr = sock.recvfrom(65535)
@@ -636,7 +782,13 @@ class DiscoveryServer(threading.Thread):
             payload = data.decode("utf-8", errors="replace")
             if "Probe" not in payload and "Resolve" not in payload:
                 continue
-            response = discovery_probe_match(self.config, extract_message_id(payload))
+            reply_host = local_ip_for(addr[0])
+            if not is_usable_lan_ip(reply_host):
+                reply_host = None
+            if "Resolve" in payload:
+                response = discovery_resolve_match(self.config, extract_message_id(payload), reply_host)
+            else:
+                response = discovery_probe_match(self.config, extract_message_id(payload), reply_host)
             try:
                 sock.sendto(response, addr)
                 print(f"[discovery] replied to {addr[0]}:{addr[1]}")
@@ -692,6 +844,8 @@ def run_camera(config: CameraConfig, stop_event: threading.Event | None = None) 
     print(f"[config] media service: {config.media_service_url}")
     print(f"[config] rtsp uri: {config.stream_uri}")
     print(f"[config] snapshot uri: {config.effective_snapshot_url}")
+    if config.public_host.startswith("127."):
+        print("[warn] public_host is loopback. NVRs on other machines cannot discover/connect; set public_host to this PC's LAN IP.")
 
     discovery = None
     if config.discovery_enabled:

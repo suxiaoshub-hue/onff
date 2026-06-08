@@ -91,6 +91,30 @@ Password: 留空
 
 有些 NVR 不支持无认证 ONVIF 设备，或者要求更完整的 Profile S 行为。遇到这种情况，建议先用 ONVIF Device Manager 验证发现和 `GetStreamUri` 是否正常，再针对目标平台补认证或特定接口。
 
+### 录像机搜不到设备
+
+如果软件已经运行，但 NVR 搜不到 `VirtualCamera`，优先检查这些点：
+
+1. 在运行软件的电脑上确认局域网 IP，例如 `192.168.x.x` 或 `10.x.x.x`，不要用 `127.0.0.1`。
+2. 在另一台局域网设备上打开 `http://电脑IP:8000/`，能打开才说明 NVR 可以访问 ONVIF HTTP 服务。
+3. Windows 防火墙允许 `VirtualOnvifCamera.exe` 入站，或手动放行 TCP `8000` 和 UDP `3702`。
+4. 关闭 VPN、代理网卡、虚拟机网卡后重启软件再搜一次，避免自动识别到错误网卡。
+5. 如果自动识别 IP 不对，编辑 `virtual_onvif_camera.ini`：
+
+```ini
+public_host = 电脑的局域网IP
+```
+
+6. 搜索仍失败时，在 NVR 里手动添加：
+
+```text
+ONVIF Host: 电脑的局域网IP
+ONVIF Port: 8000
+ONVIF Path: /onvif/device_service
+Username: 留空
+Password: 留空
+```
+
 ## 使用 go2rtc 创建 RTSP 源
 
 示例 `go2rtc.yaml`：
