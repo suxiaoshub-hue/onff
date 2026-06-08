@@ -6,6 +6,7 @@ from pathlib import Path
 
 from virtual_onvif_camera import (
     CameraConfig,
+    ScreenRtspStream,
     detect_soap_action,
     dispatch_soap,
     discovery_hello,
@@ -69,6 +70,20 @@ class VirtualOnvifCameraTests(unittest.TestCase):
         self.assertEqual("rtsp://192.0.2.10:8555/TestCam", config.stream_uri)
         self.assertEqual("rtsp://127.0.0.1:8555/TestCam", config.local_publish_uri)
         self.assertTrue(config.should_start_screen_stream)
+
+    def test_mediamtx_config_enables_stream_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp)
+            config.rtsp_url = ""
+            stream = ScreenRtspStream(config)
+            stream.mediamtx_config = Path(tmp) / "mediamtx.yml"
+            path = stream.write_mediamtx_config()
+            text = path.read_text(encoding="utf-8")
+
+        self.assertIn("rtspAddress: :8554", text)
+        self.assertIn("rtspTransports: [tcp]", text)
+        self.assertIn("  TestCam:", text)
+        self.assertIn("  all_others:", text)
 
     def test_get_capabilities_advertises_device_and_media_services(self):
         with tempfile.TemporaryDirectory() as tmp:

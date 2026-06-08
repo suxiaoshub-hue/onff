@@ -119,6 +119,8 @@ Password: admin
 
 能搜到但连接不上时，重点看控制台是否还有 `[soap] ... -> Unsupported`，以及是否出现 `[screen] desktop RTSP stream ready:`。如果没有 `[screen]` 成功日志，检查 artifact 里是否有 `ffmpeg.exe` 和 `mediamtx.exe`，并放行 TCP `8554`。
 
+如果 `mediamtx.exe` 窗口里出现 `path 'VirtualCamera' is not configured`，说明 RTSP 服务没有加载本程序生成的路径配置。请使用最新版 artifact，启动时应看到 `mediamtx config: ...mediamtx_virtual_onvif.yml`。
+
 ## 使用 go2rtc 创建 RTSP 源
 
 示例 `go2rtc.yaml`：
