@@ -172,6 +172,9 @@ screen_stream = true
 screen_fps = 15
 screen_width = 1280
 screen_bitrate = 6000k
+encoder_preset = veryfast
+h264_profile = baseline
+keyframe_seconds = 1
 snapshot_url =
 name = VirtualCamera
 username = admin
@@ -219,6 +222,9 @@ def read_config_defaults(path: Path) -> dict[str, str]:
         "screen_fps": section.get("screen_fps", os.getenv("ONVIF_SCREEN_FPS", "15")),
         "screen_width": section.get("screen_width", os.getenv("ONVIF_SCREEN_WIDTH", "1280")),
         "screen_bitrate": section.get("screen_bitrate", os.getenv("ONVIF_SCREEN_BITRATE", "6000k")),
+        "encoder_preset": section.get("encoder_preset", os.getenv("ONVIF_ENCODER_PRESET", "veryfast")),
+        "h264_profile": section.get("h264_profile", os.getenv("ONVIF_H264_PROFILE", "baseline")),
+        "keyframe_seconds": section.get("keyframe_seconds", os.getenv("ONVIF_KEYFRAME_SECONDS", "1")),
         "snapshot_url": section.get("snapshot_url", os.getenv("ONVIF_SNAPSHOT_URL", "")),
         "name": section.get("name", os.getenv("ONVIF_NAME", "VirtualCamera")),
         "username": section.get("username", os.getenv("ONVIF_USERNAME", "admin")),
@@ -265,6 +271,9 @@ class CameraConfig:
         self.screen_fps = max(1, args.screen_fps)
         self.screen_width = max(320, args.screen_width)
         self.screen_bitrate = args.screen_bitrate
+        self.encoder_preset = args.encoder_preset
+        self.h264_profile = args.h264_profile
+        self.keyframe_seconds = max(1, args.keyframe_seconds)
         self.snapshot_url = args.snapshot_url
         self.public_host = auto_public_host() if args.public_host in {None, "", "auto"} else args.public_host
         frame_dir = str(default_frame_dir()) if args.frame_dir == "auto" else args.frame_dir
@@ -563,6 +572,19 @@ def bitrate_kbps(config: CameraConfig) -> int:
     return value * 1000 if suffix == "m" else value
 
 
+def h264_profile_name(config: CameraConfig) -> str:
+    value = config.h264_profile.strip().lower()
+    if value == "baseline":
+        return "Baseline"
+    if value == "high":
+        return "High"
+    return "Main"
+
+
+def keyframe_interval(config: CameraConfig) -> int:
+    return max(2, config.screen_fps * config.keyframe_seconds)
+
+
 def profile_xml(config: CameraConfig) -> str:
     width, height = video_dimensions(config)
     bitrate = bitrate_kbps(config)
@@ -581,7 +603,7 @@ def profile_xml(config: CameraConfig) -> str:
         <tt:Resolution><tt:Width>{width}</tt:Width><tt:Height>{height}</tt:Height></tt:Resolution>
         <tt:Quality>5</tt:Quality>
         <tt:RateControl><tt:FrameRateLimit>{config.screen_fps}</tt:FrameRateLimit><tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>{bitrate}</tt:BitrateLimit></tt:RateControl>
-        <tt:H264><tt:GovLength>{max(2, config.screen_fps * 2)}</tt:GovLength><tt:H264Profile>Main</tt:H264Profile></tt:H264>
+        <tt:H264><tt:GovLength>{keyframe_interval(config)}</tt:GovLength><tt:H264Profile>{h264_profile_name(config)}</tt:H264Profile></tt:H264>
         <tt:SessionTimeout>PT60S</tt:SessionTimeout>
       </tt:VideoEncoderConfiguration>
     </trt:Profiles>"""
@@ -663,7 +685,7 @@ def video_encoder_configuration_xml(config: CameraConfig) -> str:
       <tt:Resolution><tt:Width>{width}</tt:Width><tt:Height>{height}</tt:Height></tt:Resolution>
       <tt:Quality>5</tt:Quality>
       <tt:RateControl><tt:FrameRateLimit>{config.screen_fps}</tt:FrameRateLimit><tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>{bitrate}</tt:BitrateLimit></tt:RateControl>
-      <tt:H264><tt:GovLength>{max(2, config.screen_fps * 2)}</tt:GovLength><tt:H264Profile>Main</tt:H264Profile></tt:H264>
+      <tt:H264><tt:GovLength>{keyframe_interval(config)}</tt:GovLength><tt:H264Profile>{h264_profile_name(config)}</tt:H264Profile></tt:H264>
       <tt:SessionTimeout>PT60S</tt:SessionTimeout>
     </trt:Configurations>"""
 
@@ -1372,17 +1394,23 @@ paths:
             "-c:v",
             "libx264",
             "-preset",
-            "ultrafast",
+            self.config.encoder_preset,
             "-tune",
             "zerolatency",
+            "-profile:v",
+            self.config.h264_profile,
             "-pix_fmt",
             "yuv420p",
             "-g",
-            str(max(2, self.config.screen_fps * 2)),
+            str(keyframe_interval(self.config)),
             "-keyint_min",
-            str(max(1, self.config.screen_fps)),
+            str(keyframe_interval(self.config)),
             "-sc_threshold",
             "0",
+            "-bf",
+            "0",
+            "-x264-params",
+            "repeat-headers=1",
             "-b:v",
             self.config.screen_bitrate,
             "-maxrate",
@@ -1398,7 +1426,8 @@ paths:
         ]
         print(
             f"[screen] ffmpeg capture: fps={self.config.screen_fps}, "
-            f"width={self.config.screen_width}, bitrate={self.config.screen_bitrate}"
+            f"width={self.config.screen_width}, bitrate={self.config.screen_bitrate}, "
+            f"profile={self.config.h264_profile}, preset={self.config.encoder_preset}"
         )
         self.ffmpeg = self._popen(command, "ffmpeg")
         time.sleep(2.0)
@@ -1460,6 +1489,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--screen-fps", type=int, default=int(defaults["screen_fps"]), help="Desktop RTSP capture framerate")
     parser.add_argument("--screen-width", type=int, default=int(defaults["screen_width"]), help="Desktop RTSP output width")
     parser.add_argument("--screen-bitrate", default=defaults["screen_bitrate"], help="Desktop RTSP video bitrate, e.g. 6000k")
+    parser.add_argument("--encoder-preset", default=defaults["encoder_preset"], help="x264 preset, e.g. veryfast or superfast")
+    parser.add_argument("--h264-profile", default=defaults["h264_profile"], help="H.264 profile: baseline, main, or high")
+    parser.add_argument("--keyframe-seconds", type=int, default=int(defaults["keyframe_seconds"]), help="Keyframe interval in seconds")
     parser.add_argument("--snapshot-url", default=defaults["snapshot_url"], help="Snapshot URI returned by GetSnapshotUri")
     parser.add_argument("--name", default=defaults["name"], help="Camera/profile name")
     parser.add_argument("--username", default=defaults["username"], help="ONVIF username advertised by GetUsers")

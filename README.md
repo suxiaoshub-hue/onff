@@ -127,6 +127,9 @@ Password: admin
 screen_fps = 30
 screen_width = 1280
 screen_bitrate = 6000k
+encoder_preset = veryfast
+h264_profile = baseline
+keyframe_seconds = 1
 ```
 
 如果 CPU 或网络压力大，改成：
@@ -135,6 +138,9 @@ screen_bitrate = 6000k
 screen_fps = 25
 screen_width = 960
 screen_bitrate = 4000k
+encoder_preset = veryfast
+h264_profile = baseline
+keyframe_seconds = 1
 ```
 
 ## 使用 go2rtc 创建 RTSP 源
@@ -202,6 +208,9 @@ screen_stream = true
 screen_fps = 15
 screen_width = 1280
 screen_bitrate = 6000k
+encoder_preset = veryfast
+h264_profile = baseline
+keyframe_seconds = 1
 snapshot_url =
 name = VirtualCamera
 username = admin
@@ -219,6 +228,9 @@ screen_stream     rtsp_url 为 auto 时是否自动推送电脑桌面
 screen_fps        桌面推流帧率，默认 15
 screen_width      桌面推流宽度，默认 1280
 screen_bitrate    桌面推流码率，默认 6000k
+encoder_preset    x264 编码速度，默认 veryfast
+h264_profile      H.264 profile，默认 baseline，兼容性优先
+keyframe_seconds  关键帧间隔秒数，默认 1
 port              HTTP / ONVIF 服务端口，默认 8000
 name              摄像机名称，默认 VirtualCamera
 username/password ONVIF 连接账号，默认 admin / admin

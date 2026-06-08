@@ -32,6 +32,9 @@ def make_config(frame_dir: str) -> CameraConfig:
             screen_fps=15,
             screen_width=1280,
             screen_bitrate="6000k",
+            encoder_preset="veryfast",
+            h264_profile="baseline",
+            keyframe_seconds=1,
             snapshot_url="",
             name="TestCam",
             username="admin",
@@ -84,6 +87,8 @@ class VirtualOnvifCameraTests(unittest.TestCase):
         self.assertIn("<tt:Height>540</tt:Height>", response)
         self.assertIn("<tt:FrameRateLimit>60</tt:FrameRateLimit>", response)
         self.assertIn("<tt:BitrateLimit>4000</tt:BitrateLimit>", response)
+        self.assertIn("<tt:GovLength>60</tt:GovLength>", response)
+        self.assertIn("<tt:H264Profile>Baseline</tt:H264Profile>", response)
 
     def test_mediamtx_config_enables_stream_path(self):
         with tempfile.TemporaryDirectory() as tmp:
