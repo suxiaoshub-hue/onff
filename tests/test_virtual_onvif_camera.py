@@ -12,6 +12,7 @@ from virtual_onvif_camera import (
     discovery_resolve_match,
     extract_message_id,
     host_without_port,
+    legacy_discovery_probe_match,
 )
 
 
@@ -114,6 +115,17 @@ class VirtualOnvifCameraTests(unittest.TestCase):
 
         self.assertIn("http://198.51.100.7:8080/onvif/device_service", response)
         self.assertNotIn("http://192.0.2.10:8080/onvif/device_service", response)
+
+    def test_legacy_discovery_probe_match_uses_older_addressing_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp)
+            response = legacy_discovery_probe_match(config, "uuid:probe-message", "198.51.100.7").decode()
+
+        self.assertIn('xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"', response)
+        self.assertIn("<wsdd:ProbeMatches>", response)
+        self.assertIn("<wsa:RelatesTo>uuid:probe-message</wsa:RelatesTo>", response)
+        self.assertIn("<wsdd:Types>dn:NetworkVideoTransmitter</wsdd:Types>", response)
+        self.assertIn("http://198.51.100.7:8080/onvif/device_service", response)
 
     def test_discovery_hello_advertises_device(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -34,6 +34,7 @@ from urllib.parse import urlparse
 
 SOAP_ENV = "http://www.w3.org/2003/05/soap-envelope"
 WSA = "http://www.w3.org/2005/08/addressing"
+WSA_LEGACY = "http://schemas.xmlsoap.org/ws/2004/08/addressing"
 WSD = "http://schemas.xmlsoap.org/ws/2005/04/discovery"
 TDS = "http://www.onvif.org/ver10/device/wsdl"
 TRT = "http://www.onvif.org/ver10/media/wsdl"
@@ -878,6 +879,37 @@ def discovery_probe_match(config: CameraConfig, relates_to: str | None = None, p
     return xml.encode("utf-8")
 
 
+def legacy_discovery_probe_match(config: CameraConfig, relates_to: str | None = None, public_host: str | None = None) -> bytes:
+    relates = f"<wsa:RelatesTo>{xml_escape(relates_to)}</wsa:RelatesTo>" if relates_to else ""
+    scopes = discovery_scopes(config)
+    xaddr = discovery_device_service_url(config, public_host)
+    message_id = f"uuid:{uuid.uuid4()}"
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="{SOAP_ENV}" xmlns:wsa="{WSA_LEGACY}" xmlns:wsdd="{WSD}" xmlns:dn="http://www.onvif.org/ver10/network/wsdl">
+  <SOAP-ENV:Header>
+    <wsa:MessageID>{message_id}</wsa:MessageID>
+    <wsa:To>{WSA_LEGACY}/role/anonymous</wsa:To>
+    <wsa:Action>{WSD}/ProbeMatches</wsa:Action>
+    {relates}
+  </SOAP-ENV:Header>
+  <SOAP-ENV:Body>
+    <wsdd:ProbeMatches>
+      <wsdd:ProbeMatch>
+        <wsa:EndpointReference>
+          <wsa:Address>urn:uuid:{xml_escape(config.uuid)}</wsa:Address>
+        </wsa:EndpointReference>
+        <wsdd:Types>dn:NetworkVideoTransmitter</wsdd:Types>
+        <wsdd:Scopes>{xml_escape(scopes)}</wsdd:Scopes>
+        <wsdd:XAddrs>{xml_escape(xaddr)}</wsdd:XAddrs>
+        <wsdd:MetadataVersion>1</wsdd:MetadataVersion>
+      </wsdd:ProbeMatch>
+    </wsdd:ProbeMatches>
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>
+"""
+    return xml.encode("utf-8")
+
+
 def discovery_resolve_match(config: CameraConfig, relates_to: str | None = None, public_host: str | None = None) -> bytes:
     relates = f"<a:RelatesTo>{xml_escape(relates_to)}</a:RelatesTo>" if relates_to else ""
     message_id = f"urn:uuid:{uuid.uuid4()}"
@@ -900,6 +932,37 @@ def discovery_resolve_match(config: CameraConfig, relates_to: str | None = None,
     return xml.encode("utf-8")
 
 
+def legacy_discovery_resolve_match(config: CameraConfig, relates_to: str | None = None, public_host: str | None = None) -> bytes:
+    relates = f"<wsa:RelatesTo>{xml_escape(relates_to)}</wsa:RelatesTo>" if relates_to else ""
+    scopes = discovery_scopes(config)
+    xaddr = discovery_device_service_url(config, public_host)
+    message_id = f"uuid:{uuid.uuid4()}"
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="{SOAP_ENV}" xmlns:wsa="{WSA_LEGACY}" xmlns:wsdd="{WSD}" xmlns:dn="http://www.onvif.org/ver10/network/wsdl">
+  <SOAP-ENV:Header>
+    <wsa:MessageID>{message_id}</wsa:MessageID>
+    <wsa:To>{WSA_LEGACY}/role/anonymous</wsa:To>
+    <wsa:Action>{WSD}/ResolveMatches</wsa:Action>
+    {relates}
+  </SOAP-ENV:Header>
+  <SOAP-ENV:Body>
+    <wsdd:ResolveMatches>
+      <wsdd:ResolveMatch>
+        <wsa:EndpointReference>
+          <wsa:Address>urn:uuid:{xml_escape(config.uuid)}</wsa:Address>
+        </wsa:EndpointReference>
+        <wsdd:Types>dn:NetworkVideoTransmitter</wsdd:Types>
+        <wsdd:Scopes>{xml_escape(scopes)}</wsdd:Scopes>
+        <wsdd:XAddrs>{xml_escape(xaddr)}</wsdd:XAddrs>
+        <wsdd:MetadataVersion>1</wsdd:MetadataVersion>
+      </wsdd:ResolveMatch>
+    </wsdd:ResolveMatches>
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>
+"""
+    return xml.encode("utf-8")
+
+
 def discovery_hello(config: CameraConfig) -> bytes:
     message_id = f"urn:uuid:{uuid.uuid4()}"
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -914,6 +977,32 @@ def discovery_hello(config: CameraConfig) -> bytes:
 {discovery_target_xml(config, "Hello")}
   </e:Body>
 </e:Envelope>
+"""
+    return xml.encode("utf-8")
+
+
+def legacy_discovery_hello(config: CameraConfig) -> bytes:
+    scopes = discovery_scopes(config)
+    message_id = f"uuid:{uuid.uuid4()}"
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="{SOAP_ENV}" xmlns:wsa="{WSA_LEGACY}" xmlns:wsdd="{WSD}" xmlns:dn="http://www.onvif.org/ver10/network/wsdl">
+  <SOAP-ENV:Header>
+    <wsa:MessageID>{message_id}</wsa:MessageID>
+    <wsa:To>{DISCOVERY_TO}</wsa:To>
+    <wsa:Action>{WSD}/Hello</wsa:Action>
+  </SOAP-ENV:Header>
+  <SOAP-ENV:Body>
+    <wsdd:Hello>
+      <wsa:EndpointReference>
+        <wsa:Address>urn:uuid:{xml_escape(config.uuid)}</wsa:Address>
+      </wsa:EndpointReference>
+      <wsdd:Types>dn:NetworkVideoTransmitter</wsdd:Types>
+      <wsdd:Scopes>{xml_escape(scopes)}</wsdd:Scopes>
+      <wsdd:XAddrs>{xml_escape(config.device_service_url)}</wsdd:XAddrs>
+      <wsdd:MetadataVersion>1</wsdd:MetadataVersion>
+    </wsdd:Hello>
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>
 """
     return xml.encode("utf-8")
 
@@ -966,6 +1055,7 @@ class DiscoveryServer(threading.Thread):
 
         try:
             sock.sendto(discovery_hello(self.config), (self.config.discovery_addr, self.config.discovery_port))
+            sock.sendto(legacy_discovery_hello(self.config), (self.config.discovery_addr, self.config.discovery_port))
             print(f"[discovery] hello sent to {self.config.discovery_addr}:{self.config.discovery_port}")
         except OSError as exc:
             print(f"[discovery] hello failed: {exc}")
@@ -982,12 +1072,19 @@ class DiscoveryServer(threading.Thread):
             if not is_usable_lan_ip(reply_host):
                 reply_host = None
             if "Resolve" in payload:
-                response = discovery_resolve_match(self.config, extract_message_id(payload), reply_host)
+                responses = [
+                    discovery_resolve_match(self.config, extract_message_id(payload), reply_host),
+                    legacy_discovery_resolve_match(self.config, extract_message_id(payload), reply_host),
+                ]
             else:
-                response = discovery_probe_match(self.config, extract_message_id(payload), reply_host)
+                responses = [
+                    discovery_probe_match(self.config, extract_message_id(payload), reply_host),
+                    legacy_discovery_probe_match(self.config, extract_message_id(payload), reply_host),
+                ]
             try:
-                sock.sendto(response, addr)
-                print(f"[discovery] replied to {addr[0]}:{addr[1]}")
+                for response in responses:
+                    sock.sendto(response, addr)
+                print(f"[discovery] replied to {addr[0]}:{addr[1]} ({len(responses)} variants)")
             except OSError as exc:
                 print(f"[discovery] reply failed: {exc}")
 
