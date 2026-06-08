@@ -126,7 +126,10 @@ Password: admin
 ```ini
 screen_fps = 30
 screen_width = 1280
-screen_bitrate = 6000k
+screen_height = 720
+screen_bitrate = 8000k
+capture_backend = auto
+encoder = auto
 encoder_preset = veryfast
 h264_profile = baseline
 keyframe_seconds = 1
@@ -137,10 +140,19 @@ keyframe_seconds = 1
 ```ini
 screen_fps = 25
 screen_width = 960
+screen_height = 540
 screen_bitrate = 4000k
+capture_backend = auto
+encoder = auto
 encoder_preset = veryfast
 h264_profile = baseline
 keyframe_seconds = 1
+```
+
+`encoder = auto` 会优先尝试 Intel QSV，失败后自动回退到 CPU 编码。服务器只有微软通用显卡驱动时，一般会自动回退到 `libx264`。如果电脑有 NVIDIA 显卡，可以试：
+
+```ini
+encoder = h264_nvenc
 ```
 
 ## 使用 go2rtc 创建 RTSP 源
@@ -207,7 +219,12 @@ rtsp_port = 8554
 screen_stream = true
 screen_fps = 15
 screen_width = 1280
+screen_height = 720
 screen_bitrate = 6000k
+capture_backend = auto
+capture_output = 0
+draw_mouse = true
+encoder = auto
 encoder_preset = veryfast
 h264_profile = baseline
 keyframe_seconds = 1
@@ -227,7 +244,12 @@ rtsp_port         内置桌面 RTSP 端口，默认 8554
 screen_stream     rtsp_url 为 auto 时是否自动推送电脑桌面
 screen_fps        桌面推流帧率，默认 15
 screen_width      桌面推流宽度，默认 1280
+screen_height     桌面推流高度，默认 720
 screen_bitrate    桌面推流码率，默认 6000k
+capture_backend   桌面采集方式，auto / ddagrab / gdigrab
+capture_output    ddagrab 采集的屏幕编号，默认 0
+draw_mouse        是否把鼠标一起推送，默认 true
+encoder           H.264 编码器，auto / libx264 / h264_nvenc / h264_qsv / h264_amf
 encoder_preset    x264 编码速度，默认 veryfast
 h264_profile      H.264 profile，默认 baseline，兼容性优先
 keyframe_seconds  关键帧间隔秒数，默认 1

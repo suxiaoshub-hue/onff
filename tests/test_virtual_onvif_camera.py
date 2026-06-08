@@ -31,7 +31,12 @@ def make_config(frame_dir: str) -> CameraConfig:
             screen_stream=True,
             screen_fps=15,
             screen_width=1280,
+            screen_height=720,
             screen_bitrate="6000k",
+            capture_backend="auto",
+            capture_output=0,
+            draw_mouse=True,
+            encoder="auto",
             encoder_preset="veryfast",
             h264_profile="baseline",
             keyframe_seconds=1,
@@ -80,6 +85,7 @@ class VirtualOnvifCameraTests(unittest.TestCase):
             config = make_config(tmp)
             config.screen_fps = 60
             config.screen_width = 960
+            config.screen_height = 540
             config.screen_bitrate = "4000k"
             response = dispatch_soap(config, "<trt:GetProfiles/>").decode()
 
@@ -104,6 +110,41 @@ class VirtualOnvifCameraTests(unittest.TestCase):
         self.assertIn("  TestCam:", text)
         self.assertIn("  all_others:", text)
 
+    def test_ffmpeg_command_uses_fixed_dimensions_and_cfr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp)
+            config.rtsp_url = ""
+            stream = ScreenRtspStream(config)
+            command = stream.ffmpeg_command(Path("ffmpeg.exe"), "gdigrab", "libx264")
+
+        self.assertIn("scale=1280:720:flags=fast_bilinear,format=yuv420p", command)
+        self.assertIn("-use_wallclock_as_timestamps", command)
+        self.assertIn("-fps_mode", command)
+        self.assertIn("cfr", command)
+        self.assertIn("rtsp://127.0.0.1:8554/TestCam", command)
+
+    def test_auto_capture_prefers_ddagrab_then_gdigrab(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp)
+            stream = ScreenRtspStream(config)
+
+        self.assertEqual(["ddagrab", "gdigrab"], stream.capture_backends())
+
+    def test_auto_encoder_prefers_qsv_then_cpu_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp)
+            stream = ScreenRtspStream(config)
+
+        self.assertEqual(["h264_qsv", "libx264"], stream.encoders())
+
+    def test_explicit_hardware_encoder_keeps_cpu_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp)
+            config.encoder = "h264_qsv"
+            stream = ScreenRtspStream(config)
+
+        self.assertEqual(["h264_qsv", "libx264"], stream.encoders())
+
     def test_get_capabilities_advertises_device_and_media_services(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(tmp)
@@ -112,6 +153,26 @@ class VirtualOnvifCameraTests(unittest.TestCase):
         self.assertIn("http://192.0.2.10:8080/onvif/device_service", response)
         self.assertIn("http://192.0.2.10:8080/onvif/media_service", response)
         self.assertIn("http://www.w3.org/2005/08/addressing/anonymous", response)
+
+    def test_network_protocols_uses_configured_rtsp_port(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp)
+            config.rtsp_port = 8558
+            response = dispatch_soap(config, "<tds:GetNetworkProtocols/>").decode()
+
+        self.assertIn("<tt:Name>RTSP</tt:Name><tt:Enabled>true</tt:Enabled><tt:Port>8558</tt:Port>", response)
+
+    def test_video_encoder_options_include_runtime_resolution_and_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp)
+            config.screen_width = 960
+            config.screen_height = 540
+            response = dispatch_soap(config, "<trt:GetVideoEncoderConfigurationOptions/>").decode()
+
+        self.assertIn("<tt:Width>960</tt:Width><tt:Height>540</tt:Height>", response)
+        self.assertIn("<tt:H264ProfilesSupported>Baseline</tt:H264ProfilesSupported>", response)
+        self.assertIn("<tt:H264ProfilesSupported>Main</tt:H264ProfilesSupported>", response)
+        self.assertIn("<tt:H264ProfilesSupported>High</tt:H264ProfilesSupported>", response)
 
     def test_common_onvif_initialization_actions_are_supported(self):
         actions = [

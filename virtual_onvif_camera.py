@@ -171,7 +171,12 @@ rtsp_port = 8554
 screen_stream = true
 screen_fps = 15
 screen_width = 1280
+screen_height = 720
 screen_bitrate = 6000k
+capture_backend = auto
+capture_output = 0
+draw_mouse = true
+encoder = auto
 encoder_preset = veryfast
 h264_profile = baseline
 keyframe_seconds = 1
@@ -221,7 +226,12 @@ def read_config_defaults(path: Path) -> dict[str, str]:
         "screen_stream": section.get("screen_stream", os.getenv("ONVIF_SCREEN_STREAM", "true")),
         "screen_fps": section.get("screen_fps", os.getenv("ONVIF_SCREEN_FPS", "15")),
         "screen_width": section.get("screen_width", os.getenv("ONVIF_SCREEN_WIDTH", "1280")),
+        "screen_height": section.get("screen_height", os.getenv("ONVIF_SCREEN_HEIGHT", "720")),
         "screen_bitrate": section.get("screen_bitrate", os.getenv("ONVIF_SCREEN_BITRATE", "6000k")),
+        "capture_backend": section.get("capture_backend", os.getenv("ONVIF_CAPTURE_BACKEND", "auto")),
+        "capture_output": section.get("capture_output", os.getenv("ONVIF_CAPTURE_OUTPUT", "0")),
+        "draw_mouse": section.get("draw_mouse", os.getenv("ONVIF_DRAW_MOUSE", "true")),
+        "encoder": section.get("encoder", os.getenv("ONVIF_ENCODER", "auto")),
         "encoder_preset": section.get("encoder_preset", os.getenv("ONVIF_ENCODER_PRESET", "veryfast")),
         "h264_profile": section.get("h264_profile", os.getenv("ONVIF_H264_PROFILE", "baseline")),
         "keyframe_seconds": section.get("keyframe_seconds", os.getenv("ONVIF_KEYFRAME_SECONDS", "1")),
@@ -270,7 +280,12 @@ class CameraConfig:
         self.screen_stream_enabled = bool(args.screen_stream)
         self.screen_fps = max(1, args.screen_fps)
         self.screen_width = max(320, args.screen_width)
+        self.screen_height = max(180, args.screen_height)
         self.screen_bitrate = args.screen_bitrate
+        self.capture_backend = args.capture_backend.strip().lower()
+        self.capture_output = max(0, args.capture_output)
+        self.draw_mouse = bool(args.draw_mouse)
+        self.encoder = args.encoder.strip().lower()
         self.encoder_preset = args.encoder_preset
         self.h264_profile = args.h264_profile
         self.keyframe_seconds = max(1, args.keyframe_seconds)
@@ -492,7 +507,7 @@ def get_network_protocols(config: CameraConfig) -> bytes:
     return soap_envelope(
         f"""<tds:GetNetworkProtocolsResponse>
       <tds:NetworkProtocols><tt:Name>HTTP</tt:Name><tt:Enabled>true</tt:Enabled><tt:Port>{config.port}</tt:Port></tds:NetworkProtocols>
-      <tds:NetworkProtocols><tt:Name>RTSP</tt:Name><tt:Enabled>true</tt:Enabled><tt:Port>8554</tt:Port></tds:NetworkProtocols>
+      <tds:NetworkProtocols><tt:Name>RTSP</tt:Name><tt:Enabled>true</tt:Enabled><tt:Port>{config.rtsp_port}</tt:Port></tds:NetworkProtocols>
     </tds:GetNetworkProtocolsResponse>""",
         f"{TDS}/GetNetworkProtocolsResponse",
     )
@@ -557,7 +572,9 @@ def get_system_date_and_time() -> bytes:
 
 def video_dimensions(config: CameraConfig) -> tuple[int, int]:
     width = config.screen_width
-    height = max(180, int(width * 9 / 16))
+    height = config.screen_height
+    if width % 2:
+        width += 1
     if height % 2:
         height += 1
     return width, height
@@ -572,6 +589,13 @@ def bitrate_kbps(config: CameraConfig) -> int:
     return value * 1000 if suffix == "m" else value
 
 
+def bitrate_scaled(value: str, factor: int) -> str:
+    match = re.match(r"^\s*(\d+)\s*([kKmM]?)\s*$", value)
+    if not match:
+        return value
+    return f"{int(match.group(1)) * factor}{match.group(2)}"
+
+
 def h264_profile_name(config: CameraConfig) -> str:
     value = config.h264_profile.strip().lower()
     if value == "baseline":
@@ -579,6 +603,10 @@ def h264_profile_name(config: CameraConfig) -> str:
     if value == "high":
         return "High"
     return "Main"
+
+
+def h264_profile_value(config: CameraConfig) -> str:
+    return h264_profile_name(config).lower()
 
 
 def keyframe_interval(config: CameraConfig) -> int:
@@ -704,18 +732,33 @@ def get_video_encoder_configuration(config: CameraConfig) -> bytes:
     )
 
 
-def get_video_encoder_configuration_options() -> bytes:
+def get_video_encoder_configuration_options(config: CameraConfig) -> bytes:
+    width, height = video_dimensions(config)
+    resolutions = [(width, height), (1920, 1080), (1280, 720), (960, 540), (640, 360)]
+    seen: set[tuple[int, int]] = set()
+    resolution_nodes = []
+    for item_width, item_height in resolutions:
+        pair = (item_width, item_height)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        resolution_nodes.append(
+            f"<tt:ResolutionsAvailable><tt:Width>{item_width}</tt:Width><tt:Height>{item_height}</tt:Height></tt:ResolutionsAvailable>"
+        )
+    profile_nodes = "\n          ".join(
+        f"<tt:H264ProfilesSupported>{profile}</tt:H264ProfilesSupported>"
+        for profile in ("Baseline", "Main", "High")
+    )
     return soap_envelope(
-        """<trt:GetVideoEncoderConfigurationOptionsResponse>
+        f"""<trt:GetVideoEncoderConfigurationOptionsResponse>
       <trt:Options>
         <tt:QualityRange><tt:Min>1</tt:Min><tt:Max>10</tt:Max></tt:QualityRange>
         <tt:H264>
-          <tt:ResolutionsAvailable><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:ResolutionsAvailable>
-          <tt:ResolutionsAvailable><tt:Width>1280</tt:Width><tt:Height>720</tt:Height></tt:ResolutionsAvailable>
+          {"".join(resolution_nodes)}
           <tt:GovLengthRange><tt:Min>1</tt:Min><tt:Max>120</tt:Max></tt:GovLengthRange>
           <tt:FrameRateRange><tt:Min>1</tt:Min><tt:Max>60</tt:Max></tt:FrameRateRange>
           <tt:EncodingIntervalRange><tt:Min>1</tt:Min><tt:Max>1</tt:Max></tt:EncodingIntervalRange>
-          <tt:H264ProfilesSupported>Main</tt:H264ProfilesSupported>
+          {profile_nodes}
         </tt:H264>
       </trt:Options>
     </trt:GetVideoEncoderConfigurationOptionsResponse>""",
@@ -861,7 +904,7 @@ def dispatch_soap(config: CameraConfig, payload: str) -> bytes:
     if action == "GetCompatibleVideoEncoderConfigurations":
         return get_compatible_video_encoder_configurations(config)
     if action == "GetVideoEncoderConfigurationOptions":
-        return get_video_encoder_configuration_options()
+        return get_video_encoder_configuration_options(config)
     if action in {
         "GetMetadataConfigurations",
         "GetMetadataConfiguration",
@@ -1354,6 +1397,161 @@ paths:
         self.mediamtx_config.write_text(text, encoding="utf-8")
         return self.mediamtx_config
 
+    def capture_backends(self) -> list[str]:
+        backend = self.config.capture_backend
+        if backend == "auto":
+            return ["ddagrab", "gdigrab"]
+        if backend in {"ddagrab", "gdigrab"}:
+            return [backend]
+        print(f"[warn] unknown capture_backend={backend!r}; using auto")
+        return ["ddagrab", "gdigrab"]
+
+    def encoders(self) -> list[str]:
+        encoder = self.config.encoder or "auto"
+        if encoder == "auto":
+            # Intel QSV is the most common hardware encoder on office PCs.
+            # If the machine only has the Microsoft Basic Display Adapter,
+            # this attempt exits quickly and the stream falls back to libx264.
+            return ["h264_qsv", "libx264"]
+        if encoder in {"h264_nvenc", "h264_qsv", "h264_amf"}:
+            return [encoder, "libx264"]
+        if encoder == "libx264":
+            return ["libx264"]
+        print(f"[warn] unknown encoder={encoder!r}; using auto")
+        return ["h264_qsv", "libx264"]
+
+    def encoder_args(self, encoder: str) -> list[str]:
+        gop = str(keyframe_interval(self.config))
+        profile = h264_profile_value(self.config)
+        bufsize = bitrate_scaled(self.config.screen_bitrate, 2)
+        common_rate = [
+            "-b:v",
+            self.config.screen_bitrate,
+            "-maxrate",
+            self.config.screen_bitrate,
+            "-bufsize",
+            bufsize,
+        ]
+        if encoder == "h264_nvenc":
+            return [
+                "-c:v",
+                "h264_nvenc",
+                "-preset",
+                "p4",
+                "-profile:v",
+                profile,
+                "-g",
+                gop,
+                "-bf",
+                "0",
+                "-forced-idr",
+                "1",
+                *common_rate,
+            ]
+        if encoder == "h264_qsv":
+            return [
+                "-c:v",
+                "h264_qsv",
+                "-preset",
+                "veryfast",
+                "-profile:v",
+                profile,
+                "-g",
+                gop,
+                "-bf",
+                "0",
+                *common_rate,
+            ]
+        if encoder == "h264_amf":
+            return [
+                "-c:v",
+                "h264_amf",
+                "-usage",
+                "lowlatency",
+                "-quality",
+                "speed",
+                "-profile:v",
+                profile,
+                "-g",
+                gop,
+                "-bf",
+            "0",
+            *common_rate,
+        ]
+        return [
+            "-c:v",
+            "libx264",
+            "-preset",
+            self.config.encoder_preset,
+            "-tune",
+            "zerolatency",
+            "-profile:v",
+            profile,
+            "-g",
+            gop,
+            "-keyint_min",
+            gop,
+            "-sc_threshold",
+            "0",
+            "-bf",
+            "0",
+            "-x264-params",
+            f"keyint={gop}:min-keyint={gop}:scenecut=0:repeat-headers=1:aud=1",
+            *common_rate,
+        ]
+
+    def ffmpeg_command(self, ffmpeg: Path, backend: str, encoder: str) -> list[str]:
+        width, height = video_dimensions(self.config)
+        scale_filter = f"scale={width}:{height}:flags=fast_bilinear,format=yuv420p"
+        base = [
+            str(ffmpeg),
+            "-hide_banner",
+            "-loglevel",
+            "info",
+        ]
+        if backend == "ddagrab":
+            source = (
+                f"ddagrab=output_idx={self.config.capture_output}:"
+                f"framerate={self.config.screen_fps}:"
+                f"draw_mouse={1 if self.config.draw_mouse else 0},"
+                f"hwdownload,format=bgra,{scale_filter}"
+            )
+            input_args = ["-f", "lavfi", "-i", source]
+        else:
+            input_args = [
+                "-thread_queue_size",
+                "512",
+                "-rtbufsize",
+                "256M",
+                "-use_wallclock_as_timestamps",
+                "1",
+                "-f",
+                "gdigrab",
+                "-draw_mouse",
+                "1" if self.config.draw_mouse else "0",
+                "-framerate",
+                str(self.config.screen_fps),
+                "-i",
+                "desktop",
+                "-vf",
+                scale_filter,
+            ]
+        return [
+            *base,
+            *input_args,
+            *self.encoder_args(encoder),
+            "-pix_fmt",
+            "yuv420p",
+            "-an",
+            "-fps_mode",
+            "cfr",
+            "-f",
+            "rtsp",
+            "-rtsp_transport",
+            "tcp",
+            self.config.local_publish_uri,
+        ]
+
     def start(self) -> bool:
         if os.name != "nt":
             print("[screen] disabled: desktop RTSP capture is only enabled on Windows builds")
@@ -1376,62 +1574,25 @@ paths:
             self.stop()
             return False
 
-        command = [
-            str(ffmpeg),
-            "-hide_banner",
-            "-loglevel",
-            "info",
-            "-fflags",
-            "nobuffer",
-            "-f",
-            "gdigrab",
-            "-framerate",
-            str(self.config.screen_fps),
-            "-i",
-            "desktop",
-            "-vf",
-            f"scale={self.config.screen_width}:-2",
-            "-c:v",
-            "libx264",
-            "-preset",
-            self.config.encoder_preset,
-            "-tune",
-            "zerolatency",
-            "-profile:v",
-            self.config.h264_profile,
-            "-pix_fmt",
-            "yuv420p",
-            "-g",
-            str(keyframe_interval(self.config)),
-            "-keyint_min",
-            str(keyframe_interval(self.config)),
-            "-sc_threshold",
-            "0",
-            "-bf",
-            "0",
-            "-x264-params",
-            "repeat-headers=1",
-            "-b:v",
-            self.config.screen_bitrate,
-            "-maxrate",
-            self.config.screen_bitrate,
-            "-bufsize",
-            self.config.screen_bitrate,
-            "-an",
-            "-f",
-            "rtsp",
-            "-rtsp_transport",
-            "tcp",
-            self.config.local_publish_uri,
-        ]
         print(
             f"[screen] ffmpeg capture: fps={self.config.screen_fps}, "
-            f"width={self.config.screen_width}, bitrate={self.config.screen_bitrate}, "
-            f"profile={self.config.h264_profile}, preset={self.config.encoder_preset}"
+            f"size={video_dimensions(self.config)[0]}x{video_dimensions(self.config)[1]}, "
+            f"bitrate={self.config.screen_bitrate}, profile={h264_profile_value(self.config)}, "
+            f"encoder={self.config.encoder}, backend={self.config.capture_backend}"
         )
-        self.ffmpeg = self._popen(command, "ffmpeg")
-        time.sleep(2.0)
-        if self.ffmpeg.poll() is not None:
+        for backend in self.capture_backends():
+            for encoder in self.encoders():
+                print(f"[screen] trying capture backend={backend}, encoder={encoder}")
+                self.ffmpeg = self._popen(self.ffmpeg_command(ffmpeg, backend, encoder), "ffmpeg")
+                time.sleep(2.0)
+                if self.ffmpeg.poll() is None:
+                    print(f"[screen] capture backend active: {backend}, encoder active: {encoder}")
+                    break
+                print(f"[warn] ffmpeg exited early with backend={backend}, encoder={encoder}")
+                self.ffmpeg = None
+            if self.ffmpeg and self.ffmpeg.poll() is None:
+                break
+        if not self.ffmpeg or self.ffmpeg.poll() is not None:
             print("[error] screen stream disabled: ffmpeg desktop capture exited early")
             self.stop()
             return False
@@ -1440,7 +1601,7 @@ paths:
             self.stop()
             return False
         print(f"[screen] desktop RTSP stream ready: {self.config.stream_uri}")
-        print("[screen] if the NVR still shows disconnected, allow TCP 8554 in Windows Firewall")
+        print(f"[screen] if the NVR still shows disconnected, allow TCP {self.config.rtsp_port} in Windows Firewall")
         return True
 
     def stop(self) -> None:
@@ -1488,7 +1649,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--screen-fps", type=int, default=int(defaults["screen_fps"]), help="Desktop RTSP capture framerate")
     parser.add_argument("--screen-width", type=int, default=int(defaults["screen_width"]), help="Desktop RTSP output width")
+    parser.add_argument("--screen-height", type=int, default=int(defaults["screen_height"]), help="Desktop RTSP output height")
     parser.add_argument("--screen-bitrate", default=defaults["screen_bitrate"], help="Desktop RTSP video bitrate, e.g. 6000k")
+    parser.add_argument("--capture-backend", default=defaults["capture_backend"], help="Desktop capture backend: auto, ddagrab, or gdigrab")
+    parser.add_argument("--capture-output", type=int, default=int(defaults["capture_output"]), help="Desktop output index for ddagrab")
+    parser.add_argument(
+        "--draw-mouse",
+        dest="draw_mouse",
+        action="store_true",
+        default=config_bool(defaults["draw_mouse"], True),
+        help="Draw the mouse cursor in the desktop RTSP stream",
+    )
+    parser.add_argument(
+        "--no-draw-mouse",
+        dest="draw_mouse",
+        action="store_false",
+        help="Do not draw the mouse cursor in the desktop RTSP stream",
+    )
+    parser.add_argument("--encoder", default=defaults["encoder"], help="H.264 encoder: auto, libx264, h264_nvenc, h264_qsv, or h264_amf")
     parser.add_argument("--encoder-preset", default=defaults["encoder_preset"], help="x264 preset, e.g. veryfast or superfast")
     parser.add_argument("--h264-profile", default=defaults["h264_profile"], help="H.264 profile: baseline, main, or high")
     parser.add_argument("--keyframe-seconds", type=int, default=int(defaults["keyframe_seconds"]), help="Keyframe interval in seconds")
