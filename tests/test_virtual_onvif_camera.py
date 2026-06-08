@@ -31,6 +31,7 @@ def make_config(frame_dir: str) -> CameraConfig:
             screen_stream=True,
             screen_fps=15,
             screen_width=1280,
+            screen_bitrate="6000k",
             snapshot_url="",
             name="TestCam",
             username="admin",
@@ -70,6 +71,19 @@ class VirtualOnvifCameraTests(unittest.TestCase):
         self.assertEqual("rtsp://192.0.2.10:8555/TestCam", config.stream_uri)
         self.assertEqual("rtsp://127.0.0.1:8555/TestCam", config.local_publish_uri)
         self.assertTrue(config.should_start_screen_stream)
+
+    def test_media_profile_reflects_screen_stream_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp)
+            config.screen_fps = 60
+            config.screen_width = 960
+            config.screen_bitrate = "4000k"
+            response = dispatch_soap(config, "<trt:GetProfiles/>").decode()
+
+        self.assertIn("<tt:Width>960</tt:Width>", response)
+        self.assertIn("<tt:Height>540</tt:Height>", response)
+        self.assertIn("<tt:FrameRateLimit>60</tt:FrameRateLimit>", response)
+        self.assertIn("<tt:BitrateLimit>4000</tt:BitrateLimit>", response)
 
     def test_mediamtx_config_enables_stream_path(self):
         with tempfile.TemporaryDirectory() as tmp:

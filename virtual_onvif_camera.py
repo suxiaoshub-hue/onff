@@ -171,6 +171,7 @@ rtsp_port = 8554
 screen_stream = true
 screen_fps = 15
 screen_width = 1280
+screen_bitrate = 6000k
 snapshot_url =
 name = VirtualCamera
 username = admin
@@ -217,6 +218,7 @@ def read_config_defaults(path: Path) -> dict[str, str]:
         "screen_stream": section.get("screen_stream", os.getenv("ONVIF_SCREEN_STREAM", "true")),
         "screen_fps": section.get("screen_fps", os.getenv("ONVIF_SCREEN_FPS", "15")),
         "screen_width": section.get("screen_width", os.getenv("ONVIF_SCREEN_WIDTH", "1280")),
+        "screen_bitrate": section.get("screen_bitrate", os.getenv("ONVIF_SCREEN_BITRATE", "6000k")),
         "snapshot_url": section.get("snapshot_url", os.getenv("ONVIF_SNAPSHOT_URL", "")),
         "name": section.get("name", os.getenv("ONVIF_NAME", "VirtualCamera")),
         "username": section.get("username", os.getenv("ONVIF_USERNAME", "admin")),
@@ -262,6 +264,7 @@ class CameraConfig:
         self.screen_stream_enabled = bool(args.screen_stream)
         self.screen_fps = max(1, args.screen_fps)
         self.screen_width = max(320, args.screen_width)
+        self.screen_bitrate = args.screen_bitrate
         self.snapshot_url = args.snapshot_url
         self.public_host = auto_public_host() if args.public_host in {None, "", "auto"} else args.public_host
         frame_dir = str(default_frame_dir()) if args.frame_dir == "auto" else args.frame_dir
@@ -543,23 +546,42 @@ def get_system_date_and_time() -> bytes:
     )
 
 
+def video_dimensions(config: CameraConfig) -> tuple[int, int]:
+    width = config.screen_width
+    height = max(180, int(width * 9 / 16))
+    if height % 2:
+        height += 1
+    return width, height
+
+
+def bitrate_kbps(config: CameraConfig) -> int:
+    match = re.match(r"^\s*(\d+)\s*([kKmM]?)", config.screen_bitrate)
+    if not match:
+        return 6000
+    value = int(match.group(1))
+    suffix = match.group(2).lower()
+    return value * 1000 if suffix == "m" else value
+
+
 def profile_xml(config: CameraConfig) -> str:
+    width, height = video_dimensions(config)
+    bitrate = bitrate_kbps(config)
     return f"""<trt:Profiles fixed="true" token="profile_1">
       <tt:Name>{xml_escape(config.name)}</tt:Name>
       <tt:VideoSourceConfiguration token="video_source_config_1">
         <tt:Name>VideoSourceConfig</tt:Name>
         <tt:UseCount>1</tt:UseCount>
         <tt:SourceToken>video_source_1</tt:SourceToken>
-        <tt:Bounds x="0" y="0" width="1920" height="1080"/>
+        <tt:Bounds x="0" y="0" width="{width}" height="{height}"/>
       </tt:VideoSourceConfiguration>
       <tt:VideoEncoderConfiguration token="video_encoder_config_1">
         <tt:Name>H264</tt:Name>
         <tt:UseCount>1</tt:UseCount>
         <tt:Encoding>H264</tt:Encoding>
-        <tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution>
+        <tt:Resolution><tt:Width>{width}</tt:Width><tt:Height>{height}</tt:Height></tt:Resolution>
         <tt:Quality>5</tt:Quality>
-        <tt:RateControl><tt:FrameRateLimit>25</tt:FrameRateLimit><tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>4096</tt:BitrateLimit></tt:RateControl>
-        <tt:H264><tt:GovLength>50</tt:GovLength><tt:H264Profile>Main</tt:H264Profile></tt:H264>
+        <tt:RateControl><tt:FrameRateLimit>{config.screen_fps}</tt:FrameRateLimit><tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>{bitrate}</tt:BitrateLimit></tt:RateControl>
+        <tt:H264><tt:GovLength>{max(2, config.screen_fps * 2)}</tt:GovLength><tt:H264Profile>Main</tt:H264Profile></tt:H264>
         <tt:SessionTimeout>PT60S</tt:SessionTimeout>
       </tt:VideoEncoderConfiguration>
     </trt:Profiles>"""
@@ -580,11 +602,12 @@ def get_profile(config: CameraConfig) -> bytes:
 
 
 def get_video_sources(config: CameraConfig) -> bytes:
+    width, height = video_dimensions(config)
     return soap_envelope(
         f"""<trt:GetVideoSourcesResponse>
       <trt:VideoSources token="video_source_1">
-        <tt:Framerate>25</tt:Framerate>
-        <tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution>
+        <tt:Framerate>{config.screen_fps}</tt:Framerate>
+        <tt:Resolution><tt:Width>{width}</tt:Width><tt:Height>{height}</tt:Height></tt:Resolution>
         <tt:Imaging><tt:Brightness>50</tt:Brightness><tt:ColorSaturation>50</tt:ColorSaturation><tt:Contrast>50</tt:Contrast><tt:Sharpness>50</tt:Sharpness></tt:Imaging>
       </trt:VideoSources>
     </trt:GetVideoSourcesResponse>""",
@@ -592,66 +615,69 @@ def get_video_sources(config: CameraConfig) -> bytes:
     )
 
 
-def video_source_configuration_xml() -> str:
-    return """<trt:Configurations token="video_source_config_1">
+def video_source_configuration_xml(config: CameraConfig) -> str:
+    width, height = video_dimensions(config)
+    return f"""<trt:Configurations token="video_source_config_1">
       <tt:Name>VideoSourceConfig</tt:Name>
       <tt:UseCount>1</tt:UseCount>
       <tt:SourceToken>video_source_1</tt:SourceToken>
-      <tt:Bounds x="0" y="0" width="1920" height="1080"/>
+      <tt:Bounds x="0" y="0" width="{width}" height="{height}"/>
     </trt:Configurations>"""
 
 
-def get_video_source_configurations() -> bytes:
+def get_video_source_configurations(config: CameraConfig) -> bytes:
     return soap_envelope(
-        f"<trt:GetVideoSourceConfigurationsResponse>{video_source_configuration_xml()}</trt:GetVideoSourceConfigurationsResponse>",
+        f"<trt:GetVideoSourceConfigurationsResponse>{video_source_configuration_xml(config)}</trt:GetVideoSourceConfigurationsResponse>",
         f"{TRT}/GetVideoSourceConfigurationsResponse",
     )
 
 
-def get_video_source_configuration() -> bytes:
+def get_video_source_configuration(config: CameraConfig) -> bytes:
     return soap_envelope(
-        f"<trt:GetVideoSourceConfigurationResponse>{video_source_configuration_xml()}</trt:GetVideoSourceConfigurationResponse>",
+        f"<trt:GetVideoSourceConfigurationResponse>{video_source_configuration_xml(config)}</trt:GetVideoSourceConfigurationResponse>",
         f"{TRT}/GetVideoSourceConfigurationResponse",
     )
 
 
-def get_compatible_video_encoder_configurations() -> bytes:
+def get_compatible_video_encoder_configurations(config: CameraConfig) -> bytes:
     return soap_envelope(
-        f"<trt:GetCompatibleVideoEncoderConfigurationsResponse>{video_encoder_configuration_xml()}</trt:GetCompatibleVideoEncoderConfigurationsResponse>",
+        f"<trt:GetCompatibleVideoEncoderConfigurationsResponse>{video_encoder_configuration_xml(config)}</trt:GetCompatibleVideoEncoderConfigurationsResponse>",
         f"{TRT}/GetCompatibleVideoEncoderConfigurationsResponse",
     )
 
 
-def get_compatible_video_source_configurations() -> bytes:
+def get_compatible_video_source_configurations(config: CameraConfig) -> bytes:
     return soap_envelope(
-        f"<trt:GetCompatibleVideoSourceConfigurationsResponse>{video_source_configuration_xml()}</trt:GetCompatibleVideoSourceConfigurationsResponse>",
+        f"<trt:GetCompatibleVideoSourceConfigurationsResponse>{video_source_configuration_xml(config)}</trt:GetCompatibleVideoSourceConfigurationsResponse>",
         f"{TRT}/GetCompatibleVideoSourceConfigurationsResponse",
     )
 
 
-def video_encoder_configuration_xml() -> str:
-    return """<trt:Configurations token="video_encoder_config_1">
+def video_encoder_configuration_xml(config: CameraConfig) -> str:
+    width, height = video_dimensions(config)
+    bitrate = bitrate_kbps(config)
+    return f"""<trt:Configurations token="video_encoder_config_1">
       <tt:Name>H264</tt:Name>
       <tt:UseCount>1</tt:UseCount>
       <tt:Encoding>H264</tt:Encoding>
-      <tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution>
+      <tt:Resolution><tt:Width>{width}</tt:Width><tt:Height>{height}</tt:Height></tt:Resolution>
       <tt:Quality>5</tt:Quality>
-      <tt:RateControl><tt:FrameRateLimit>25</tt:FrameRateLimit><tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>4096</tt:BitrateLimit></tt:RateControl>
-      <tt:H264><tt:GovLength>50</tt:GovLength><tt:H264Profile>Main</tt:H264Profile></tt:H264>
+      <tt:RateControl><tt:FrameRateLimit>{config.screen_fps}</tt:FrameRateLimit><tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>{bitrate}</tt:BitrateLimit></tt:RateControl>
+      <tt:H264><tt:GovLength>{max(2, config.screen_fps * 2)}</tt:GovLength><tt:H264Profile>Main</tt:H264Profile></tt:H264>
       <tt:SessionTimeout>PT60S</tt:SessionTimeout>
     </trt:Configurations>"""
 
 
-def get_video_encoder_configurations() -> bytes:
+def get_video_encoder_configurations(config: CameraConfig) -> bytes:
     return soap_envelope(
-        f"<trt:GetVideoEncoderConfigurationsResponse>{video_encoder_configuration_xml()}</trt:GetVideoEncoderConfigurationsResponse>",
+        f"<trt:GetVideoEncoderConfigurationsResponse>{video_encoder_configuration_xml(config)}</trt:GetVideoEncoderConfigurationsResponse>",
         f"{TRT}/GetVideoEncoderConfigurationsResponse",
     )
 
 
-def get_video_encoder_configuration() -> bytes:
+def get_video_encoder_configuration(config: CameraConfig) -> bytes:
     return soap_envelope(
-        f"<trt:GetVideoEncoderConfigurationResponse>{video_encoder_configuration_xml()}</trt:GetVideoEncoderConfigurationResponse>",
+        f"<trt:GetVideoEncoderConfigurationResponse>{video_encoder_configuration_xml(config)}</trt:GetVideoEncoderConfigurationResponse>",
         f"{TRT}/GetVideoEncoderConfigurationResponse",
     )
 
@@ -665,7 +691,7 @@ def get_video_encoder_configuration_options() -> bytes:
           <tt:ResolutionsAvailable><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:ResolutionsAvailable>
           <tt:ResolutionsAvailable><tt:Width>1280</tt:Width><tt:Height>720</tt:Height></tt:ResolutionsAvailable>
           <tt:GovLengthRange><tt:Min>1</tt:Min><tt:Max>120</tt:Max></tt:GovLengthRange>
-          <tt:FrameRateRange><tt:Min>1</tt:Min><tt:Max>30</tt:Max></tt:FrameRateRange>
+          <tt:FrameRateRange><tt:Min>1</tt:Min><tt:Max>60</tt:Max></tt:FrameRateRange>
           <tt:EncodingIntervalRange><tt:Min>1</tt:Min><tt:Max>1</tt:Max></tt:EncodingIntervalRange>
           <tt:H264ProfilesSupported>Main</tt:H264ProfilesSupported>
         </tt:H264>
@@ -801,17 +827,17 @@ def dispatch_soap(config: CameraConfig, payload: str) -> bytes:
     if action == "GetVideoSources":
         return get_video_sources(config)
     if action == "GetVideoSourceConfigurations":
-        return get_video_source_configurations()
+        return get_video_source_configurations(config)
     if action == "GetVideoSourceConfiguration":
-        return get_video_source_configuration()
+        return get_video_source_configuration(config)
     if action == "GetCompatibleVideoSourceConfigurations":
-        return get_compatible_video_source_configurations()
+        return get_compatible_video_source_configurations(config)
     if action == "GetVideoEncoderConfigurations":
-        return get_video_encoder_configurations()
+        return get_video_encoder_configurations(config)
     if action == "GetVideoEncoderConfiguration":
-        return get_video_encoder_configuration()
+        return get_video_encoder_configuration(config)
     if action == "GetCompatibleVideoEncoderConfigurations":
-        return get_compatible_video_encoder_configurations()
+        return get_compatible_video_encoder_configurations(config)
     if action == "GetVideoEncoderConfigurationOptions":
         return get_video_encoder_configuration_options()
     if action in {
@@ -1332,7 +1358,9 @@ paths:
             str(ffmpeg),
             "-hide_banner",
             "-loglevel",
-            "warning",
+            "info",
+            "-fflags",
+            "nobuffer",
             "-f",
             "gdigrab",
             "-framerate",
@@ -1351,8 +1379,16 @@ paths:
             "yuv420p",
             "-g",
             str(max(2, self.config.screen_fps * 2)),
+            "-keyint_min",
+            str(max(1, self.config.screen_fps)),
+            "-sc_threshold",
+            "0",
             "-b:v",
-            "2500k",
+            self.config.screen_bitrate,
+            "-maxrate",
+            self.config.screen_bitrate,
+            "-bufsize",
+            self.config.screen_bitrate,
             "-an",
             "-f",
             "rtsp",
@@ -1360,6 +1396,10 @@ paths:
             "tcp",
             self.config.local_publish_uri,
         ]
+        print(
+            f"[screen] ffmpeg capture: fps={self.config.screen_fps}, "
+            f"width={self.config.screen_width}, bitrate={self.config.screen_bitrate}"
+        )
         self.ffmpeg = self._popen(command, "ffmpeg")
         time.sleep(2.0)
         if self.ffmpeg.poll() is not None:
@@ -1419,6 +1459,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--screen-fps", type=int, default=int(defaults["screen_fps"]), help="Desktop RTSP capture framerate")
     parser.add_argument("--screen-width", type=int, default=int(defaults["screen_width"]), help="Desktop RTSP output width")
+    parser.add_argument("--screen-bitrate", default=defaults["screen_bitrate"], help="Desktop RTSP video bitrate, e.g. 6000k")
     parser.add_argument("--snapshot-url", default=defaults["snapshot_url"], help="Snapshot URI returned by GetSnapshotUri")
     parser.add_argument("--name", default=defaults["name"], help="Camera/profile name")
     parser.add_argument("--username", default=defaults["username"], help="ONVIF username advertised by GetUsers")

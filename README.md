@@ -121,6 +121,22 @@ Password: admin
 
 如果 `mediamtx.exe` 窗口里出现 `path 'VirtualCamera' is not configured`，说明 RTSP 服务没有加载本程序生成的路径配置。请使用最新版 artifact，启动时应看到 `mediamtx config: ...mediamtx_virtual_onvif.yml`。
 
+画面卡顿时，不建议直接改到 `60fps`。很多 NVR 小窗口或解码器对 60fps 支持不好，优先使用：
+
+```ini
+screen_fps = 30
+screen_width = 1280
+screen_bitrate = 6000k
+```
+
+如果 CPU 或网络压力大，改成：
+
+```ini
+screen_fps = 25
+screen_width = 960
+screen_bitrate = 4000k
+```
+
 ## 使用 go2rtc 创建 RTSP 源
 
 示例 `go2rtc.yaml`：
@@ -185,6 +201,7 @@ rtsp_port = 8554
 screen_stream = true
 screen_fps = 15
 screen_width = 1280
+screen_bitrate = 6000k
 snapshot_url =
 name = VirtualCamera
 username = admin
@@ -201,6 +218,7 @@ rtsp_port         内置桌面 RTSP 端口，默认 8554
 screen_stream     rtsp_url 为 auto 时是否自动推送电脑桌面
 screen_fps        桌面推流帧率，默认 15
 screen_width      桌面推流宽度，默认 1280
+screen_bitrate    桌面推流码率，默认 6000k
 port              HTTP / ONVIF 服务端口，默认 8000
 name              摄像机名称，默认 VirtualCamera
 username/password ONVIF 连接账号，默认 admin / admin
