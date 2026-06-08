@@ -117,7 +117,7 @@ Username: admin
 Password: admin
 ```
 
-能搜到但连接不上时，重点看控制台是否还有 `[soap] ... -> Unsupported`，以及是否出现 `[screen] desktop RTSP stream:`。如果没有 `[screen]` 成功日志，检查 artifact 里是否有 `ffmpeg.exe` 和 `mediamtx.exe`，并放行 TCP `8554`。
+能搜到但连接不上时，重点看控制台是否还有 `[soap] ... -> Unsupported`，以及是否出现 `[screen] desktop RTSP stream ready:`。如果没有 `[screen]` 成功日志，检查 artifact 里是否有 `ffmpeg.exe` 和 `mediamtx.exe`，并放行 TCP `8554`。
 
 ## 使用 go2rtc 创建 RTSP 源
 

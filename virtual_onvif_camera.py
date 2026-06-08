@@ -122,6 +122,14 @@ def host_without_port(value: str) -> str:
     return value
 
 
+def tcp_port_open(host: str, port: int, timeout: float = 1.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def first_existing(paths: Iterable[Path]) -> Path | None:
     for path in paths:
         if path.exists():
@@ -681,6 +689,12 @@ def get_snapshot_uri(config: CameraConfig) -> bytes:
 
 
 def get_stream_uri(config: CameraConfig) -> bytes:
+    parsed = urlparse(config.stream_uri)
+    if parsed.hostname and parsed.port and not config.rtsp_url:
+        if tcp_port_open("127.0.0.1", parsed.port, timeout=0.3):
+            print(f"[rtsp] stream uri requested and local RTSP port is open: {config.stream_uri}")
+        else:
+            print(f"[error] stream uri requested but local RTSP port is closed: 127.0.0.1:{parsed.port}")
     return soap_envelope(
         f"""<trt:GetStreamUriResponse>
       <trt:MediaUri>
@@ -1272,13 +1286,17 @@ class ScreenRtspStream:
         mediamtx = tool_path("mediamtx")
         ffmpeg = tool_path("ffmpeg")
         if not mediamtx or not ffmpeg:
-            print("[screen] disabled: mediamtx.exe or ffmpeg.exe was not found next to the app")
+            print("[error] screen stream disabled: mediamtx.exe or ffmpeg.exe was not found next to the app")
             return False
 
         self.mediamtx = self._popen([str(mediamtx)], "mediamtx")
         time.sleep(1.0)
         if self.mediamtx.poll() is not None:
-            print("[screen] disabled: mediamtx exited early; TCP 8554 may already be in use")
+            print(f"[error] screen stream disabled: mediamtx exited early; TCP {self.config.rtsp_port} may already be in use")
+            return False
+        if not tcp_port_open("127.0.0.1", self.config.rtsp_port):
+            print(f"[error] screen stream disabled: RTSP server is not listening on 127.0.0.1:{self.config.rtsp_port}")
+            self.stop()
             return False
 
         command = [
@@ -1314,12 +1332,17 @@ class ScreenRtspStream:
             self.config.local_publish_uri,
         ]
         self.ffmpeg = self._popen(command, "ffmpeg")
-        time.sleep(1.0)
+        time.sleep(2.0)
         if self.ffmpeg.poll() is not None:
-            print("[screen] disabled: ffmpeg desktop capture exited early")
+            print("[error] screen stream disabled: ffmpeg desktop capture exited early")
             self.stop()
             return False
-        print(f"[screen] desktop RTSP stream: {self.config.stream_uri}")
+        if not tcp_port_open("127.0.0.1", self.config.rtsp_port):
+            print(f"[error] screen stream disabled: RTSP server is not reachable on 127.0.0.1:{self.config.rtsp_port}")
+            self.stop()
+            return False
+        print(f"[screen] desktop RTSP stream ready: {self.config.stream_uri}")
+        print("[screen] if the NVR still shows disconnected, allow TCP 8554 in Windows Firewall")
         return True
 
     def stop(self) -> None:

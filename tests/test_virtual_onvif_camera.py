@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import socket
 from argparse import Namespace
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from virtual_onvif_camera import (
     host_without_port,
     legacy_discovery_probe_match,
     summarize_soap_action,
+    tcp_port_open,
 )
 
 
@@ -137,6 +139,15 @@ class VirtualOnvifCameraTests(unittest.TestCase):
             "GetAudioSources",
             summarize_soap_action("<s:Body><trt:GetAudioSources/></s:Body>"),
         )
+
+    def test_tcp_port_open_detects_listening_socket(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(sock.close)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+
+        self.assertTrue(tcp_port_open("127.0.0.1", port))
 
     def test_discovery_probe_match_contains_uuid_and_xaddr(self):
         with tempfile.TemporaryDirectory() as tmp:
