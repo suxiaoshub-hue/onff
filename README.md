@@ -85,8 +85,8 @@ virtual_onvif_camera.ini
 ONVIF Host: 服务器 IP
 ONVIF Port: 8000
 ONVIF Path: /onvif/device_service
-Username: 留空
-Password: 留空
+Username: admin
+Password: admin
 ```
 
 有些 NVR 不支持无认证 ONVIF 设备，或者要求更完整的 Profile S 行为。遇到这种情况，建议先用 ONVIF Device Manager 验证发现和 `GetStreamUri` 是否正常，再针对目标平台补认证或特定接口。
@@ -111,9 +111,11 @@ public_host = 电脑的局域网IP
 ONVIF Host: 电脑的局域网IP
 ONVIF Port: 8000
 ONVIF Path: /onvif/device_service
-Username: 留空
-Password: 留空
+Username: admin
+Password: admin
 ```
+
+能搜到但连接不上时，重点看控制台是否还有 `[soap] ... -> Unsupported`。如果没有 Unsupported，下一步通常是 RTSP 视频流问题：默认 `rtsp://电脑IP:8554/VirtualCamera` 只是返回给 NVR 的视频地址，本程序本身不创建 8554 RTSP 视频流。需要搭配 go2rtc / MediaMTX / FFmpeg，或把 `rtsp_url` 改成一个已经能播放的真实 RTSP 地址。
 
 ## 使用 go2rtc 创建 RTSP 源
 
@@ -175,6 +177,8 @@ public_host = auto
 rtsp_url = auto
 snapshot_url =
 name = VirtualCamera
+username = admin
+password = admin
 discovery = true
 ```
 
@@ -185,6 +189,7 @@ public_host       对外广播给 NVR 的服务器 IP，auto 为自动识别
 rtsp_url          GetStreamUri 返回的 RTSP 地址，auto 为 rtsp://<本机IP>:8554/VirtualCamera
 port              HTTP / ONVIF 服务端口，默认 8000
 name              摄像机名称，默认 VirtualCamera
+username/password ONVIF 连接账号，默认 admin / admin
 discovery         是否开启 WS-Discovery
 ```
 

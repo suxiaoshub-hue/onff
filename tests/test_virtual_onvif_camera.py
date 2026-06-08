@@ -13,6 +13,7 @@ from virtual_onvif_camera import (
     extract_message_id,
     host_without_port,
     legacy_discovery_probe_match,
+    summarize_soap_action,
 )
 
 
@@ -25,6 +26,8 @@ def make_config(frame_dir: str) -> CameraConfig:
             rtsp_url="rtsp://192.0.2.20:8554/cam1",
             snapshot_url="",
             name="TestCam",
+            username="admin",
+            password="admin",
             manufacturer="Codex",
             model="Virtual ONVIF Camera",
             serial="TEST-001",
@@ -72,6 +75,13 @@ class VirtualOnvifCameraTests(unittest.TestCase):
             "GetVideoEncoderConfigurations",
             "GetVideoEncoderConfiguration",
             "GetVideoEncoderConfigurationOptions",
+            "GetVideoSourceConfigurations",
+            "GetVideoSourceConfiguration",
+            "GetCompatibleVideoEncoderConfigurations",
+            "GetCompatibleVideoSourceConfigurations",
+            "GetMetadataConfigurations",
+            "GetAudioSources",
+            "GetAudioEncoderConfigurations",
         ]
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(tmp)
@@ -94,6 +104,24 @@ class VirtualOnvifCameraTests(unittest.TestCase):
         self.assertEqual(
             "GetVideoEncoderConfigurationOptions",
             detect_soap_action("<trt:GetVideoEncoderConfigurationOptions/>"),
+        )
+
+    def test_get_users_advertises_default_admin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp)
+            response = dispatch_soap(config, "<tds:GetUsers/>").decode()
+
+        self.assertIn("<tt:Username>admin</tt:Username>", response)
+        self.assertIn("<tt:UserLevel>Administrator</tt:UserLevel>", response)
+
+    def test_summarize_soap_action_uses_header_or_body(self):
+        self.assertEqual(
+            "GetMetadataConfigurations",
+            summarize_soap_action("<a:Action>http://www.onvif.org/ver10/media/wsdl/GetMetadataConfigurations</a:Action>"),
+        )
+        self.assertEqual(
+            "GetAudioSources",
+            summarize_soap_action("<s:Body><trt:GetAudioSources/></s:Body>"),
         )
 
     def test_discovery_probe_match_contains_uuid_and_xaddr(self):

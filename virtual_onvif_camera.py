@@ -19,6 +19,7 @@ import ipaddress
 import itertools
 import mimetypes
 import os
+import re
 import socket
 import socketserver
 import sys
@@ -158,6 +159,8 @@ public_host = auto
 rtsp_url = auto
 snapshot_url =
 name = VirtualCamera
+username = admin
+password = admin
 manufacturer = Codex
 model = Virtual ONVIF Camera
 serial = VOC-0001
@@ -198,6 +201,8 @@ def read_config_defaults(path: Path) -> dict[str, str]:
         "rtsp_url": section.get("rtsp_url", os.getenv("ONVIF_RTSP_URL", "auto")),
         "snapshot_url": section.get("snapshot_url", os.getenv("ONVIF_SNAPSHOT_URL", "")),
         "name": section.get("name", os.getenv("ONVIF_NAME", "VirtualCamera")),
+        "username": section.get("username", os.getenv("ONVIF_USERNAME", "admin")),
+        "password": section.get("password", os.getenv("ONVIF_PASSWORD", "admin")),
         "manufacturer": section.get("manufacturer", os.getenv("ONVIF_MANUFACTURER", "Codex")),
         "model": section.get("model", os.getenv("ONVIF_MODEL", "Virtual ONVIF Camera")),
         "serial": section.get("serial", os.getenv("ONVIF_SERIAL", "VOC-0001")),
@@ -226,6 +231,8 @@ class CameraConfig:
         self.host = args.host
         self.port = args.port
         self.name = args.name
+        self.username = args.username
+        self.password = args.password
         self.manufacturer = args.manufacturer
         self.model = args.model
         self.serial = args.serial
@@ -342,7 +349,7 @@ def get_device_service_capabilities() -> bytes:
         """<tds:GetServiceCapabilitiesResponse>
       <tds:Capabilities>
         <tds:Network IPFilter="false" ZeroConfiguration="false" IPVersion6="false" DynDNS="false"/>
-        <tds:Security TLS1.1="false" TLS1.2="false" OnboardKeyGeneration="false" AccessPolicyConfig="false" X.509Token="false" SAMLToken="false" KerberosToken="false" RELToken="false"/>
+        <tds:Security TLS1.1="false" TLS1.2="false" OnboardKeyGeneration="false" AccessPolicyConfig="false" X.509Token="false" SAMLToken="false" KerberosToken="false" RELToken="false" UsernameToken="true" HttpDigest="false"/>
         <tds:System DiscoveryResolve="true" DiscoveryBye="true" RemoteDiscovery="false" SystemBackup="false" SystemLogging="false" FirmwareUpgrade="false"/>
       </tds:Capabilities>
     </tds:GetServiceCapabilitiesResponse>""",
@@ -453,9 +460,14 @@ def get_discovery_mode() -> bytes:
     )
 
 
-def get_users() -> bytes:
+def get_users(config: CameraConfig) -> bytes:
     return soap_envelope(
-        """<tds:GetUsersResponse/>""",
+        f"""<tds:GetUsersResponse>
+      <tds:User>
+        <tt:Username>{xml_escape(config.username)}</tt:Username>
+        <tt:UserLevel>Administrator</tt:UserLevel>
+      </tds:User>
+    </tds:GetUsersResponse>""",
         f"{TDS}/GetUsersResponse",
     )
 
@@ -525,6 +537,13 @@ def get_profiles(config: CameraConfig) -> bytes:
     )
 
 
+def get_profile(config: CameraConfig) -> bytes:
+    return soap_envelope(
+        f"<trt:GetProfileResponse>{profile_xml(config)}</trt:GetProfileResponse>",
+        f"{TRT}/GetProfileResponse",
+    )
+
+
 def get_video_sources(config: CameraConfig) -> bytes:
     return soap_envelope(
         f"""<trt:GetVideoSourcesResponse>
@@ -535,6 +554,43 @@ def get_video_sources(config: CameraConfig) -> bytes:
       </trt:VideoSources>
     </trt:GetVideoSourcesResponse>""",
         f"{TRT}/GetVideoSourcesResponse",
+    )
+
+
+def video_source_configuration_xml() -> str:
+    return """<trt:Configurations token="video_source_config_1">
+      <tt:Name>VideoSourceConfig</tt:Name>
+      <tt:UseCount>1</tt:UseCount>
+      <tt:SourceToken>video_source_1</tt:SourceToken>
+      <tt:Bounds x="0" y="0" width="1920" height="1080"/>
+    </trt:Configurations>"""
+
+
+def get_video_source_configurations() -> bytes:
+    return soap_envelope(
+        f"<trt:GetVideoSourceConfigurationsResponse>{video_source_configuration_xml()}</trt:GetVideoSourceConfigurationsResponse>",
+        f"{TRT}/GetVideoSourceConfigurationsResponse",
+    )
+
+
+def get_video_source_configuration() -> bytes:
+    return soap_envelope(
+        f"<trt:GetVideoSourceConfigurationResponse>{video_source_configuration_xml()}</trt:GetVideoSourceConfigurationResponse>",
+        f"{TRT}/GetVideoSourceConfigurationResponse",
+    )
+
+
+def get_compatible_video_encoder_configurations() -> bytes:
+    return soap_envelope(
+        f"<trt:GetCompatibleVideoEncoderConfigurationsResponse>{video_encoder_configuration_xml()}</trt:GetCompatibleVideoEncoderConfigurationsResponse>",
+        f"{TRT}/GetCompatibleVideoEncoderConfigurationsResponse",
+    )
+
+
+def get_compatible_video_source_configurations() -> bytes:
+    return soap_envelope(
+        f"<trt:GetCompatibleVideoSourceConfigurationsResponse>{video_source_configuration_xml()}</trt:GetCompatibleVideoSourceConfigurationsResponse>",
+        f"{TRT}/GetCompatibleVideoSourceConfigurationsResponse",
     )
 
 
@@ -584,6 +640,10 @@ def get_video_encoder_configuration_options() -> bytes:
     )
 
 
+def empty_media_list_response(action: str) -> bytes:
+    return soap_envelope(f"<trt:{action}Response/>", f"{TRT}/{action}Response")
+
+
 def get_snapshot_uri(config: CameraConfig) -> bytes:
     return soap_envelope(
         f"""<trt:GetSnapshotUriResponse>
@@ -614,9 +674,13 @@ def get_stream_uri(config: CameraConfig) -> bytes:
 
 def detect_soap_action(payload: str) -> str:
     for action in [
+        "GetCompatibleVideoEncoderConfigurations",
+        "GetCompatibleVideoSourceConfigurations",
         "GetVideoEncoderConfigurationOptions",
         "GetVideoEncoderConfigurations",
         "GetVideoEncoderConfiguration",
+        "GetVideoSourceConfigurations",
+        "GetVideoSourceConfiguration",
         "GetServiceCapabilities",
         "GetEndpointReference",
         "GetNetworkInterfaces",
@@ -628,15 +692,37 @@ def detect_soap_action(payload: str) -> str:
         "GetSnapshotUri",
         "GetStreamUri",
         "GetVideoSources",
+        "GetMetadataConfigurations",
+        "GetMetadataConfiguration",
+        "GetAudioSourceConfigurations",
+        "GetAudioEncoderConfigurations",
+        "GetAudioSources",
+        "GetAudioOutputs",
+        "GetAudioDecoderConfigurations",
+        "GetAudioOutputConfigurations",
+        "GetOSDs",
         "GetProfiles",
+        "GetProfile",
         "GetServices",
         "GetHostname",
         "GetScopes",
         "GetUsers",
+        "SetSynchronizationPoint",
+        "SetSystemDateAndTime",
     ]:
         if action in payload:
             return action
     return "Unsupported"
+
+
+def summarize_soap_action(payload: str) -> str:
+    action_match = re.search(r"<[^:>]*:?Action[^>]*>([^<]+)</[^:>]*:?Action>", payload)
+    if action_match:
+        return action_match.group(1).strip().rsplit("/", 1)[-1]
+    body_match = re.search(r"<(?:\w+:)?Body[^>]*>\s*<([^\s>/]+)", payload)
+    if body_match:
+        return body_match.group(1).split(":", 1)[-1]
+    return "Unknown"
 
 
 def dispatch_soap(config: CameraConfig, payload: str) -> bytes:
@@ -662,21 +748,47 @@ def dispatch_soap(config: CameraConfig, payload: str) -> bytes:
     if action == "GetDiscoveryMode":
         return get_discovery_mode()
     if action == "GetUsers":
-        return get_users()
+        return get_users(config)
     if action == "GetScopes":
         return get_scopes(config)
     if action == "GetSystemDateAndTime":
         return get_system_date_and_time()
     if action == "GetProfiles":
         return get_profiles(config)
+    if action == "GetProfile":
+        return get_profile(config)
     if action == "GetVideoSources":
         return get_video_sources(config)
+    if action == "GetVideoSourceConfigurations":
+        return get_video_source_configurations()
+    if action == "GetVideoSourceConfiguration":
+        return get_video_source_configuration()
+    if action == "GetCompatibleVideoSourceConfigurations":
+        return get_compatible_video_source_configurations()
     if action == "GetVideoEncoderConfigurations":
         return get_video_encoder_configurations()
     if action == "GetVideoEncoderConfiguration":
         return get_video_encoder_configuration()
+    if action == "GetCompatibleVideoEncoderConfigurations":
+        return get_compatible_video_encoder_configurations()
     if action == "GetVideoEncoderConfigurationOptions":
         return get_video_encoder_configuration_options()
+    if action in {
+        "GetMetadataConfigurations",
+        "GetMetadataConfiguration",
+        "GetAudioSourceConfigurations",
+        "GetAudioEncoderConfigurations",
+        "GetAudioSources",
+        "GetAudioOutputs",
+        "GetAudioDecoderConfigurations",
+        "GetAudioOutputConfigurations",
+        "GetOSDs",
+    }:
+        return empty_media_list_response(action)
+    if action == "SetSynchronizationPoint":
+        return soap_envelope("<trt:SetSynchronizationPointResponse/>", f"{TRT}/SetSynchronizationPointResponse")
+    if action == "SetSystemDateAndTime":
+        return soap_envelope("<tds:SetSystemDateAndTimeResponse/>", f"{TDS}/SetSystemDateAndTimeResponse")
     if action == "GetSnapshotUri":
         return get_snapshot_uri(config)
     if action == "GetStreamUri":
@@ -726,7 +838,8 @@ class VirtualCameraHandler(BaseHTTPRequestHandler):
         size = int(self.headers.get("Content-Length", "0"))
         payload = self.rfile.read(size).decode("utf-8", errors="replace")
         action = detect_soap_action(payload)
-        print(f"[soap] {self.client_address[0]} -> {action}")
+        requested_action = summarize_soap_action(payload)
+        print(f"[soap] {self.client_address[0]} -> {action} (requested: {requested_action})")
         if action == "Unsupported":
             preview = " ".join(payload.split())[:500]
             print(f"[soap] unsupported payload preview: {preview}")
@@ -1106,6 +1219,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--rtsp-url", default=defaults["rtsp_url"], help="RTSP stream URI returned by GetStreamUri")
     parser.add_argument("--snapshot-url", default=defaults["snapshot_url"], help="Snapshot URI returned by GetSnapshotUri")
     parser.add_argument("--name", default=defaults["name"], help="Camera/profile name")
+    parser.add_argument("--username", default=defaults["username"], help="ONVIF username advertised by GetUsers")
+    parser.add_argument("--password", default=defaults["password"], help="ONVIF password accepted by clients")
     parser.add_argument("--manufacturer", default=defaults["manufacturer"], help="ONVIF manufacturer")
     parser.add_argument("--model", default=defaults["model"], help="ONVIF model")
     parser.add_argument("--serial", default=defaults["serial"], help="ONVIF serial number")
@@ -1137,6 +1252,7 @@ def run_camera(config: CameraConfig, stop_event: threading.Event | None = None) 
     print(f"[config] media service: {config.media_service_url}")
     print(f"[config] rtsp uri: {config.stream_uri}")
     print(f"[config] snapshot uri: {config.effective_snapshot_url}")
+    print(f"[config] onvif username: {config.username}")
     if config.public_host.startswith("127."):
         print("[warn] public_host is loopback. NVRs on other machines cannot discover/connect; set public_host to this PC's LAN IP.")
 
