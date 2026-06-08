@@ -5,6 +5,7 @@ from pathlib import Path
 
 from virtual_onvif_camera import (
     CameraConfig,
+    detect_soap_action,
     dispatch_soap,
     discovery_hello,
     discovery_probe_match,
@@ -56,6 +57,43 @@ class VirtualOnvifCameraTests(unittest.TestCase):
 
         self.assertIn("http://192.0.2.10:8080/onvif/device_service", response)
         self.assertIn("http://192.0.2.10:8080/onvif/media_service", response)
+        self.assertIn("http://www.w3.org/2005/08/addressing/anonymous", response)
+
+    def test_common_onvif_initialization_actions_are_supported(self):
+        actions = [
+            "GetServiceCapabilities",
+            "GetEndpointReference",
+            "GetHostname",
+            "GetNetworkInterfaces",
+            "GetNetworkProtocols",
+            "GetDiscoveryMode",
+            "GetUsers",
+            "GetVideoEncoderConfigurations",
+            "GetVideoEncoderConfiguration",
+            "GetVideoEncoderConfigurationOptions",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp)
+            for action in actions:
+                with self.subTest(action=action):
+                    response = dispatch_soap(config, f"<tds:{action}/>").decode()
+
+                self.assertIn(f"{action}Response", response)
+                self.assertNotIn("Unsupported ONVIF action", response)
+
+    def test_media_service_capabilities_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp)
+            response = dispatch_soap(config, "<trt:GetServiceCapabilities/>").decode()
+
+        self.assertIn("trt:GetServiceCapabilitiesResponse", response)
+        self.assertIn("SnapshotUri", response)
+
+    def test_detect_soap_action_prefers_longest_match(self):
+        self.assertEqual(
+            "GetVideoEncoderConfigurationOptions",
+            detect_soap_action("<trt:GetVideoEncoderConfigurationOptions/>"),
+        )
 
     def test_discovery_probe_match_contains_uuid_and_xaddr(self):
         with tempfile.TemporaryDirectory() as tmp:

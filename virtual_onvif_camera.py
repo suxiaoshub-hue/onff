@@ -299,7 +299,7 @@ def soap_envelope(body: str, action: str | None = None) -> bytes:
   <s:Header>
     {action_node}
     <wsa:MessageID>{message_id}</wsa:MessageID>
-    <wsa:To s:mustUnderstand="true">{SOAP_ENV}/role/anonymous</wsa:To>
+    <wsa:To s:mustUnderstand="true">{WSA}/anonymous</wsa:To>
   </s:Header>
   <s:Body>
     {body}
@@ -336,6 +336,31 @@ def get_services(config: CameraConfig) -> bytes:
     )
 
 
+def get_device_service_capabilities() -> bytes:
+    return soap_envelope(
+        """<tds:GetServiceCapabilitiesResponse>
+      <tds:Capabilities>
+        <tds:Network IPFilter="false" ZeroConfiguration="false" IPVersion6="false" DynDNS="false"/>
+        <tds:Security TLS1.1="false" TLS1.2="false" OnboardKeyGeneration="false" AccessPolicyConfig="false" X.509Token="false" SAMLToken="false" KerberosToken="false" RELToken="false"/>
+        <tds:System DiscoveryResolve="true" DiscoveryBye="true" RemoteDiscovery="false" SystemBackup="false" SystemLogging="false" FirmwareUpgrade="false"/>
+      </tds:Capabilities>
+    </tds:GetServiceCapabilitiesResponse>""",
+        f"{TDS}/GetServiceCapabilitiesResponse",
+    )
+
+
+def get_media_service_capabilities() -> bytes:
+    return soap_envelope(
+        """<trt:GetServiceCapabilitiesResponse>
+      <trt:Capabilities SnapshotUri="true" Rotation="false" VideoSourceMode="false" OSD="false">
+        <trt:ProfileCapabilities MaximumNumberOfProfiles="1"/>
+        <trt:StreamingCapabilities RTPMulticast="false" RTP_TCP="true" RTP_RTSP_TCP="true" NonAggregateControl="false"/>
+      </trt:Capabilities>
+    </trt:GetServiceCapabilitiesResponse>""",
+        f"{TRT}/GetServiceCapabilitiesResponse",
+    )
+
+
 def get_capabilities(config: CameraConfig) -> bytes:
     return soap_envelope(
         f"""<tds:GetCapabilitiesResponse>
@@ -355,6 +380,15 @@ def get_capabilities(config: CameraConfig) -> bytes:
     )
 
 
+def get_endpoint_reference(config: CameraConfig) -> bytes:
+    return soap_envelope(
+        f"""<tds:GetEndpointReferenceResponse>
+      <tds:GUID>urn:uuid:{xml_escape(config.uuid)}</tds:GUID>
+    </tds:GetEndpointReferenceResponse>""",
+        f"{TDS}/GetEndpointReferenceResponse",
+    )
+
+
 def get_device_information(config: CameraConfig) -> bytes:
     return soap_envelope(
         f"""<tds:GetDeviceInformationResponse>
@@ -365,6 +399,63 @@ def get_device_information(config: CameraConfig) -> bytes:
       <tds:HardwareId>{xml_escape(config.hardware_id)}</tds:HardwareId>
     </tds:GetDeviceInformationResponse>""",
         f"{TDS}/GetDeviceInformationResponse",
+    )
+
+
+def get_hostname(config: CameraConfig) -> bytes:
+    return soap_envelope(
+        f"""<tds:GetHostnameResponse>
+      <tds:HostnameInformation>
+        <tt:FromDHCP>false</tt:FromDHCP>
+        <tt:Name>{xml_escape(config.name)}</tt:Name>
+      </tds:HostnameInformation>
+    </tds:GetHostnameResponse>""",
+        f"{TDS}/GetHostnameResponse",
+    )
+
+
+def get_network_interfaces(config: CameraConfig) -> bytes:
+    return soap_envelope(
+        f"""<tds:GetNetworkInterfacesResponse>
+      <tds:NetworkInterfaces token="eth0">
+        <tt:Enabled>true</tt:Enabled>
+        <tt:Info><tt:Name>eth0</tt:Name><tt:HwAddress>02:00:00:00:00:01</tt:HwAddress><tt:MTU>1500</tt:MTU></tt:Info>
+        <tt:IPv4>
+          <tt:Enabled>true</tt:Enabled>
+          <tt:Config>
+            <tt:Manual><tt:Address>{xml_escape(config.public_host)}</tt:Address><tt:PrefixLength>24</tt:PrefixLength></tt:Manual>
+            <tt:DHCP>false</tt:DHCP>
+          </tt:Config>
+        </tt:IPv4>
+      </tds:NetworkInterfaces>
+    </tds:GetNetworkInterfacesResponse>""",
+        f"{TDS}/GetNetworkInterfacesResponse",
+    )
+
+
+def get_network_protocols(config: CameraConfig) -> bytes:
+    return soap_envelope(
+        f"""<tds:GetNetworkProtocolsResponse>
+      <tds:NetworkProtocols><tt:Name>HTTP</tt:Name><tt:Enabled>true</tt:Enabled><tt:Port>{config.port}</tt:Port></tds:NetworkProtocols>
+      <tds:NetworkProtocols><tt:Name>RTSP</tt:Name><tt:Enabled>true</tt:Enabled><tt:Port>8554</tt:Port></tds:NetworkProtocols>
+    </tds:GetNetworkProtocolsResponse>""",
+        f"{TDS}/GetNetworkProtocolsResponse",
+    )
+
+
+def get_discovery_mode() -> bytes:
+    return soap_envelope(
+        """<tds:GetDiscoveryModeResponse>
+      <tds:DiscoveryMode>Discoverable</tds:DiscoveryMode>
+    </tds:GetDiscoveryModeResponse>""",
+        f"{TDS}/GetDiscoveryModeResponse",
+    )
+
+
+def get_users() -> bytes:
+    return soap_envelope(
+        """<tds:GetUsersResponse/>""",
+        f"{TDS}/GetUsersResponse",
     )
 
 
@@ -446,6 +537,52 @@ def get_video_sources(config: CameraConfig) -> bytes:
     )
 
 
+def video_encoder_configuration_xml() -> str:
+    return """<trt:Configurations token="video_encoder_config_1">
+      <tt:Name>H264</tt:Name>
+      <tt:UseCount>1</tt:UseCount>
+      <tt:Encoding>H264</tt:Encoding>
+      <tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution>
+      <tt:Quality>5</tt:Quality>
+      <tt:RateControl><tt:FrameRateLimit>25</tt:FrameRateLimit><tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>4096</tt:BitrateLimit></tt:RateControl>
+      <tt:H264><tt:GovLength>50</tt:GovLength><tt:H264Profile>Main</tt:H264Profile></tt:H264>
+      <tt:SessionTimeout>PT60S</tt:SessionTimeout>
+    </trt:Configurations>"""
+
+
+def get_video_encoder_configurations() -> bytes:
+    return soap_envelope(
+        f"<trt:GetVideoEncoderConfigurationsResponse>{video_encoder_configuration_xml()}</trt:GetVideoEncoderConfigurationsResponse>",
+        f"{TRT}/GetVideoEncoderConfigurationsResponse",
+    )
+
+
+def get_video_encoder_configuration() -> bytes:
+    return soap_envelope(
+        f"<trt:GetVideoEncoderConfigurationResponse>{video_encoder_configuration_xml()}</trt:GetVideoEncoderConfigurationResponse>",
+        f"{TRT}/GetVideoEncoderConfigurationResponse",
+    )
+
+
+def get_video_encoder_configuration_options() -> bytes:
+    return soap_envelope(
+        """<trt:GetVideoEncoderConfigurationOptionsResponse>
+      <trt:Options>
+        <tt:QualityRange><tt:Min>1</tt:Min><tt:Max>10</tt:Max></tt:QualityRange>
+        <tt:H264>
+          <tt:ResolutionsAvailable><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:ResolutionsAvailable>
+          <tt:ResolutionsAvailable><tt:Width>1280</tt:Width><tt:Height>720</tt:Height></tt:ResolutionsAvailable>
+          <tt:GovLengthRange><tt:Min>1</tt:Min><tt:Max>120</tt:Max></tt:GovLengthRange>
+          <tt:FrameRateRange><tt:Min>1</tt:Min><tt:Max>30</tt:Max></tt:FrameRateRange>
+          <tt:EncodingIntervalRange><tt:Min>1</tt:Min><tt:Max>1</tt:Max></tt:EncodingIntervalRange>
+          <tt:H264ProfilesSupported>Main</tt:H264ProfilesSupported>
+        </tt:H264>
+      </trt:Options>
+    </trt:GetVideoEncoderConfigurationOptionsResponse>""",
+        f"{TRT}/GetVideoEncoderConfigurationOptionsResponse",
+    )
+
+
 def get_snapshot_uri(config: CameraConfig) -> bytes:
     return soap_envelope(
         f"""<trt:GetSnapshotUriResponse>
@@ -474,21 +611,75 @@ def get_stream_uri(config: CameraConfig) -> bytes:
     )
 
 
-def dispatch_soap(config: CameraConfig, payload: str) -> bytes:
-    actions = [
-        ("GetServices", lambda: get_services(config)),
-        ("GetCapabilities", lambda: get_capabilities(config)),
-        ("GetDeviceInformation", lambda: get_device_information(config)),
-        ("GetScopes", lambda: get_scopes(config)),
-        ("GetSystemDateAndTime", get_system_date_and_time),
-        ("GetProfiles", lambda: get_profiles(config)),
-        ("GetVideoSources", lambda: get_video_sources(config)),
-        ("GetSnapshotUri", lambda: get_snapshot_uri(config)),
-        ("GetStreamUri", lambda: get_stream_uri(config)),
-    ]
-    for action, response in actions:
+def detect_soap_action(payload: str) -> str:
+    for action in [
+        "GetVideoEncoderConfigurationOptions",
+        "GetVideoEncoderConfigurations",
+        "GetVideoEncoderConfiguration",
+        "GetServiceCapabilities",
+        "GetEndpointReference",
+        "GetNetworkInterfaces",
+        "GetNetworkProtocols",
+        "GetDeviceInformation",
+        "GetSystemDateAndTime",
+        "GetDiscoveryMode",
+        "GetCapabilities",
+        "GetSnapshotUri",
+        "GetStreamUri",
+        "GetVideoSources",
+        "GetProfiles",
+        "GetServices",
+        "GetHostname",
+        "GetScopes",
+        "GetUsers",
+    ]:
         if action in payload:
-            return response()
+            return action
+    return "Unsupported"
+
+
+def dispatch_soap(config: CameraConfig, payload: str) -> bytes:
+    action = detect_soap_action(payload)
+    if action == "GetServices":
+        return get_services(config)
+    if action == "GetServiceCapabilities":
+        if "trt:GetServiceCapabilities" in payload or f"{TRT}/GetServiceCapabilities" in payload:
+            return get_media_service_capabilities()
+        return get_device_service_capabilities()
+    if action == "GetCapabilities":
+        return get_capabilities(config)
+    if action == "GetEndpointReference":
+        return get_endpoint_reference(config)
+    if action == "GetDeviceInformation":
+        return get_device_information(config)
+    if action == "GetHostname":
+        return get_hostname(config)
+    if action == "GetNetworkInterfaces":
+        return get_network_interfaces(config)
+    if action == "GetNetworkProtocols":
+        return get_network_protocols(config)
+    if action == "GetDiscoveryMode":
+        return get_discovery_mode()
+    if action == "GetUsers":
+        return get_users()
+    if action == "GetScopes":
+        return get_scopes(config)
+    if action == "GetSystemDateAndTime":
+        return get_system_date_and_time()
+    if action == "GetProfiles":
+        return get_profiles(config)
+    if action == "GetVideoSources":
+        return get_video_sources(config)
+    if action == "GetVideoEncoderConfigurations":
+        return get_video_encoder_configurations()
+    if action == "GetVideoEncoderConfiguration":
+        return get_video_encoder_configuration()
+    if action == "GetVideoEncoderConfigurationOptions":
+        return get_video_encoder_configuration_options()
+    if action == "GetSnapshotUri":
+        return get_snapshot_uri(config)
+    if action == "GetStreamUri":
+        return get_stream_uri(config)
     return fault("Unsupported ONVIF action")
 
 
@@ -533,6 +724,11 @@ class VirtualCameraHandler(BaseHTTPRequestHandler):
             return
         size = int(self.headers.get("Content-Length", "0"))
         payload = self.rfile.read(size).decode("utf-8", errors="replace")
+        action = detect_soap_action(payload)
+        print(f"[soap] {self.client_address[0]} -> {action}")
+        if action == "Unsupported":
+            preview = " ".join(payload.split())[:500]
+            print(f"[soap] unsupported payload preview: {preview}")
         response = dispatch_soap(self.config_for_request(), payload)
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/soap+xml; charset=utf-8")
