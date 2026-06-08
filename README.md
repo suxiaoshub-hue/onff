@@ -14,7 +14,7 @@
 - 本地 MJPEG 预览
 - GitHub Actions 自动编译 Windows `.exe`
 
-> 说明：这个程序负责把服务器暴露成 ONVIF 摄像机，并把视频流地址返回给客户端。真正的视频流建议使用已有 RTSP 源，或搭配 go2rtc / MediaMTX / FFmpeg 创建 RTSP 流。
+> 说明：Windows artifact 会同时带上 MediaMTX 和 FFmpeg。默认双击运行时会把当前电脑桌面推成 RTSP 视频流，再通过 ONVIF 返回给 NVR。
 
 ## 快速运行
 
@@ -30,13 +30,13 @@ VirtualOnvifCamera.exe
 virtual_onvif_camera.ini
 ```
 
-默认会自动识别本机 IP，监听 `8000` 端口，并把 RTSP 地址设置为：
+默认会自动识别本机 IP，监听 `8000` 端口，并自动创建电脑桌面 RTSP 流：
 
 ```text
 rtsp://<本机IP>:8554/VirtualCamera
 ```
 
-如果你没有 RTSP 源，ONVIF 设备仍然可以被发现，也可以打开快照/MJPEG 预览；但 NVR 真正播放主码流时通常需要一个可用 RTSP 源。需要改 RTSP 地址时，编辑 `virtual_onvif_camera.ini` 里的 `rtsp_url` 即可。
+如果你想接入已有摄像头/视频源，编辑 `virtual_onvif_camera.ini` 里的 `rtsp_url`。保持 `rtsp_url = auto` 时，程序会使用内置桌面推流。
 
 启动后浏览器打开：
 
@@ -59,6 +59,8 @@ InstallService.bat
 ```
 
 它会自动安装并启动 `Virtual ONVIF Camera` 服务，不需要手动输入参数。
+
+注意：Windows 服务通常抓不到当前登录用户的桌面。需要把电脑屏幕显示到录像机时，建议直接双击运行 `VirtualOnvifCamera.exe`，不要安装为服务。
 
 其它脚本：
 
@@ -115,7 +117,7 @@ Username: admin
 Password: admin
 ```
 
-能搜到但连接不上时，重点看控制台是否还有 `[soap] ... -> Unsupported`。如果没有 Unsupported，下一步通常是 RTSP 视频流问题：默认 `rtsp://电脑IP:8554/VirtualCamera` 只是返回给 NVR 的视频地址，本程序本身不创建 8554 RTSP 视频流。需要搭配 go2rtc / MediaMTX / FFmpeg，或把 `rtsp_url` 改成一个已经能播放的真实 RTSP 地址。
+能搜到但连接不上时，重点看控制台是否还有 `[soap] ... -> Unsupported`，以及是否出现 `[screen] desktop RTSP stream:`。如果没有 `[screen]` 成功日志，检查 artifact 里是否有 `ffmpeg.exe` 和 `mediamtx.exe`，并放行 TCP `8554`。
 
 ## 使用 go2rtc 创建 RTSP 源
 
@@ -152,6 +154,8 @@ Actions -> Build Windows EXE -> Artifacts -> VirtualOnvifCamera-windows-x64
 
 ```text
 VirtualOnvifCamera.exe
+ffmpeg.exe
+mediamtx.exe
 InstallService.bat
 UninstallService.bat
 StartService.bat
@@ -175,6 +179,10 @@ host = 0.0.0.0
 port = 8000
 public_host = auto
 rtsp_url = auto
+rtsp_port = 8554
+screen_stream = true
+screen_fps = 15
+screen_width = 1280
 snapshot_url =
 name = VirtualCamera
 username = admin
@@ -187,6 +195,10 @@ discovery = true
 ```text
 public_host       对外广播给 NVR 的服务器 IP，auto 为自动识别
 rtsp_url          GetStreamUri 返回的 RTSP 地址，auto 为 rtsp://<本机IP>:8554/VirtualCamera
+rtsp_port         内置桌面 RTSP 端口，默认 8554
+screen_stream     rtsp_url 为 auto 时是否自动推送电脑桌面
+screen_fps        桌面推流帧率，默认 15
+screen_width      桌面推流宽度，默认 1280
 port              HTTP / ONVIF 服务端口，默认 8000
 name              摄像机名称，默认 VirtualCamera
 username/password ONVIF 连接账号，默认 admin / admin

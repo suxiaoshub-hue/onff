@@ -24,6 +24,10 @@ def make_config(frame_dir: str) -> CameraConfig:
             port=8080,
             public_host="192.0.2.10",
             rtsp_url="rtsp://192.0.2.20:8554/cam1",
+            rtsp_port=8554,
+            screen_stream=True,
+            screen_fps=15,
+            screen_width=1280,
             snapshot_url="",
             name="TestCam",
             username="admin",
@@ -53,6 +57,16 @@ class VirtualOnvifCameraTests(unittest.TestCase):
 
         self.assertIn("rtsp://192.0.2.20:8554/cam1", response)
         self.assertIn("GetStreamUriResponse", response)
+
+    def test_auto_stream_uri_uses_builtin_rtsp_port(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp)
+            config.rtsp_url = ""
+            config.rtsp_port = 8555
+
+        self.assertEqual("rtsp://192.0.2.10:8555/TestCam", config.stream_uri)
+        self.assertEqual("rtsp://127.0.0.1:8555/TestCam", config.local_publish_uri)
+        self.assertTrue(config.should_start_screen_stream)
 
     def test_get_capabilities_advertises_device_and_media_services(self):
         with tempfile.TemporaryDirectory() as tmp:

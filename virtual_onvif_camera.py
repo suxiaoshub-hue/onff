@@ -20,8 +20,10 @@ import itertools
 import mimetypes
 import os
 import re
+import shutil
 import socket
 import socketserver
+import subprocess
 import sys
 import threading
 import time
@@ -157,6 +159,10 @@ host = 0.0.0.0
 port = 8000
 public_host = auto
 rtsp_url = auto
+rtsp_port = 8554
+screen_stream = true
+screen_fps = 15
+screen_width = 1280
 snapshot_url =
 name = VirtualCamera
 username = admin
@@ -199,6 +205,10 @@ def read_config_defaults(path: Path) -> dict[str, str]:
         "port": section.get("port", os.getenv("ONVIF_HTTP_PORT", "8000")),
         "public_host": section.get("public_host", os.getenv("ONVIF_PUBLIC_HOST", "auto")),
         "rtsp_url": section.get("rtsp_url", os.getenv("ONVIF_RTSP_URL", "auto")),
+        "rtsp_port": section.get("rtsp_port", os.getenv("ONVIF_RTSP_PORT", "8554")),
+        "screen_stream": section.get("screen_stream", os.getenv("ONVIF_SCREEN_STREAM", "true")),
+        "screen_fps": section.get("screen_fps", os.getenv("ONVIF_SCREEN_FPS", "15")),
+        "screen_width": section.get("screen_width", os.getenv("ONVIF_SCREEN_WIDTH", "1280")),
         "snapshot_url": section.get("snapshot_url", os.getenv("ONVIF_SNAPSHOT_URL", "")),
         "name": section.get("name", os.getenv("ONVIF_NAME", "VirtualCamera")),
         "username": section.get("username", os.getenv("ONVIF_USERNAME", "admin")),
@@ -240,6 +250,10 @@ class CameraConfig:
         self.location = args.location
         self.uuid = normalize_uuid(args.uuid or None)
         self.rtsp_url = "" if args.rtsp_url == "auto" else args.rtsp_url
+        self.rtsp_port = args.rtsp_port
+        self.screen_stream_enabled = bool(args.screen_stream)
+        self.screen_fps = max(1, args.screen_fps)
+        self.screen_width = max(320, args.screen_width)
         self.snapshot_url = args.snapshot_url
         self.public_host = auto_public_host() if args.public_host in {None, "", "auto"} else args.public_host
         frame_dir = str(default_frame_dir()) if args.frame_dir == "auto" else args.frame_dir
@@ -264,7 +278,15 @@ class CameraConfig:
 
     @property
     def stream_uri(self) -> str:
-        return self.rtsp_url or f"rtsp://{self.public_host}:8554/{self.name}"
+        return self.rtsp_url or f"rtsp://{self.public_host}:{self.rtsp_port}/{self.name}"
+
+    @property
+    def local_publish_uri(self) -> str:
+        return f"rtsp://127.0.0.1:{self.rtsp_port}/{self.name}"
+
+    @property
+    def should_start_screen_stream(self) -> bool:
+        return self.screen_stream_enabled and not self.rtsp_url
 
     @property
     def effective_snapshot_url(self) -> str:
@@ -1202,6 +1224,118 @@ class DiscoveryServer(threading.Thread):
                 print(f"[discovery] reply failed: {exc}")
 
 
+def tool_path(name: str) -> Path | None:
+    names = [name]
+    if os.name == "nt" and not name.lower().endswith(".exe"):
+        names.insert(0, f"{name}.exe")
+    for root in (install_dir(), app_root()):
+        for candidate_name in names:
+            candidate = root / candidate_name
+            if candidate.exists():
+                return candidate
+    found = shutil.which(names[0])
+    return Path(found) if found else None
+
+
+class ScreenRtspStream:
+    def __init__(self, config: CameraConfig) -> None:
+        self.config = config
+        self.mediamtx: subprocess.Popen[str] | None = None
+        self.ffmpeg: subprocess.Popen[str] | None = None
+
+    def _popen(self, command: list[str], label: str) -> subprocess.Popen[str]:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        process = subprocess.Popen(
+            command,
+            cwd=str(install_dir()),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            creationflags=creationflags,
+        )
+        threading.Thread(target=self._log_output, args=(process, label), daemon=True).start()
+        return process
+
+    def _log_output(self, process: subprocess.Popen[str], label: str) -> None:
+        if not process.stdout:
+            return
+        for line in process.stdout:
+            line = line.strip()
+            if line:
+                print(f"[{label}] {line}")
+
+    def start(self) -> bool:
+        if os.name != "nt":
+            print("[screen] disabled: desktop RTSP capture is only enabled on Windows builds")
+            return False
+        mediamtx = tool_path("mediamtx")
+        ffmpeg = tool_path("ffmpeg")
+        if not mediamtx or not ffmpeg:
+            print("[screen] disabled: mediamtx.exe or ffmpeg.exe was not found next to the app")
+            return False
+
+        self.mediamtx = self._popen([str(mediamtx)], "mediamtx")
+        time.sleep(1.0)
+        if self.mediamtx.poll() is not None:
+            print("[screen] disabled: mediamtx exited early; TCP 8554 may already be in use")
+            return False
+
+        command = [
+            str(ffmpeg),
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-f",
+            "gdigrab",
+            "-framerate",
+            str(self.config.screen_fps),
+            "-i",
+            "desktop",
+            "-vf",
+            f"scale={self.config.screen_width}:-2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            str(max(2, self.config.screen_fps * 2)),
+            "-b:v",
+            "2500k",
+            "-an",
+            "-f",
+            "rtsp",
+            "-rtsp_transport",
+            "tcp",
+            self.config.local_publish_uri,
+        ]
+        self.ffmpeg = self._popen(command, "ffmpeg")
+        time.sleep(1.0)
+        if self.ffmpeg.poll() is not None:
+            print("[screen] disabled: ffmpeg desktop capture exited early")
+            self.stop()
+            return False
+        print(f"[screen] desktop RTSP stream: {self.config.stream_uri}")
+        return True
+
+    def stop(self) -> None:
+        for process in (self.ffmpeg, self.mediamtx):
+            if process and process.poll() is None:
+                process.terminate()
+        deadline = time.time() + 3
+        for process in (self.ffmpeg, self.mediamtx):
+            if not process:
+                continue
+            while process.poll() is None and time.time() < deadline:
+                time.sleep(0.1)
+            if process.poll() is None:
+                process.kill()
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config", default=str(default_config_path()))
@@ -1217,6 +1351,22 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=int(defaults["port"]), help="HTTP bind port")
     parser.add_argument("--public-host", default=defaults["public_host"], help="IP/host advertised to ONVIF clients")
     parser.add_argument("--rtsp-url", default=defaults["rtsp_url"], help="RTSP stream URI returned by GetStreamUri")
+    parser.add_argument("--rtsp-port", type=int, default=int(defaults["rtsp_port"]), help="Built-in desktop RTSP port")
+    parser.add_argument(
+        "--screen-stream",
+        dest="screen_stream",
+        action="store_true",
+        default=config_bool(defaults["screen_stream"], True),
+        help="Start the built-in Windows desktop RTSP stream when rtsp_url is auto",
+    )
+    parser.add_argument(
+        "--no-screen-stream",
+        dest="screen_stream",
+        action="store_false",
+        help="Disable the built-in Windows desktop RTSP stream",
+    )
+    parser.add_argument("--screen-fps", type=int, default=int(defaults["screen_fps"]), help="Desktop RTSP capture framerate")
+    parser.add_argument("--screen-width", type=int, default=int(defaults["screen_width"]), help="Desktop RTSP output width")
     parser.add_argument("--snapshot-url", default=defaults["snapshot_url"], help="Snapshot URI returned by GetSnapshotUri")
     parser.add_argument("--name", default=defaults["name"], help="Camera/profile name")
     parser.add_argument("--username", default=defaults["username"], help="ONVIF username advertised by GetUsers")
@@ -1256,6 +1406,13 @@ def run_camera(config: CameraConfig, stop_event: threading.Event | None = None) 
     if config.public_host.startswith("127."):
         print("[warn] public_host is loopback. NVRs on other machines cannot discover/connect; set public_host to this PC's LAN IP.")
 
+    screen_stream = None
+    if config.should_start_screen_stream:
+        screen_stream = ScreenRtspStream(config)
+        screen_stream.start()
+    else:
+        print("[screen] disabled: using configured rtsp_url")
+
     discovery = None
     if config.discovery_enabled:
         discovery = DiscoveryServer(config)
@@ -1278,6 +1435,8 @@ def run_camera(config: CameraConfig, stop_event: threading.Event | None = None) 
         server.server_close()
         if discovery:
             discovery.stop()
+        if screen_stream:
+            screen_stream.stop()
 
 
 def service_binary_path() -> str:

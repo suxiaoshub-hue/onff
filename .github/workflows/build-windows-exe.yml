@@ -25,6 +25,25 @@ jobs:
       - name: Run tests
         run: python -m unittest discover -s tests
 
+      - name: Download desktop RTSP runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force tools | Out-Null
+
+          Invoke-WebRequest `
+            -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" `
+            -OutFile "ffmpeg.zip"
+          Expand-Archive -Path "ffmpeg.zip" -DestinationPath "ffmpeg"
+          $ffmpeg = Get-ChildItem -Path "ffmpeg" -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+          Copy-Item $ffmpeg.FullName "tools\ffmpeg.exe"
+
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/bluenviron/mediamtx/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -match "windows_amd64.*\.zip$" } | Select-Object -First 1
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "mediamtx.zip"
+          Expand-Archive -Path "mediamtx.zip" -DestinationPath "mediamtx"
+          $mediamtx = Get-ChildItem -Path "mediamtx" -Recurse -Filter "mediamtx.exe" | Select-Object -First 1
+          Copy-Item $mediamtx.FullName "tools\mediamtx.exe"
+
       - name: Build EXE
         shell: pwsh
         run: |
@@ -46,6 +65,7 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item windows\*.bat dist\
+          Copy-Item tools\*.exe dist\
           python -c "from pathlib import Path; from virtual_onvif_camera import ensure_config_file; ensure_config_file(Path('dist/virtual_onvif_camera.ini'))"
 
       - name: Upload artifact
